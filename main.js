@@ -1,510 +1,776 @@
+// - Game logic uses BASE-1 tile coords everywhere: (1,1) is origin tile
+// - Only GRID talks to Phaser tile layers (base-0) internally
+// - Only GRID knows how Tiled object snapping -> tile coords works
+// - NPCs / pathfinding / object placement all share the same conventions
+// ==========================================
+
+// --------------------------
 // Global variables
+// --------------------------
 let mascot;
 let cursors;
 let collisionLayer;
 let wallSprites = [];
-let npcs = []; // Track all our NPCs
-let mapRef;    // Global reference to the map for pathfinding boundaries
+let npcs = [];
+let mapRef;
+
+// The one source of truth for conventions:
+let GRID = null;
 
 // ==========================================
-// LIGHTWEIGHT A* PATHFINDING
+// GRID + ISO ADAPTER (single source of truth)
 // ==========================================
-function findPath(startX, startY, endX, endY) {
-    const openSet = [{ x: startX, y: startY, g: 0, f: 0, parent: null }];
-    const closedSet = new Set();
-    
-    const getPosKey = (x, y) => `${x},${y}`;
-    const heuristic = (x, y) => Math.abs(x - endX) + Math.abs(y - endY);
+function makeGridIso(map, collisionLayer, originX, originY) {
+  const tileW = map.tileWidth;
+  const tileH = map.tileHeight;
 
-    while (openSet.length > 0) {
-        // Get node with lowest f score
-        openSet.sort((a, b) => a.f - b.f);
-        const current = openSet.shift();
+  // You observed Tiled snap-to-grid for object layers steps by tileHeight
+  const step = tileH;
 
-        if (current.x === endX && current.y === endY) {
-            const path = [];
-            let curr = current;
-            while (curr) {
-                path.push({ x: curr.x, y: curr.y });
-                curr = curr.parent;
-            }
-            return path.reverse(); // Return path from start to end
-        }
+  return {
+    tileW,
+    tileH,
+    originX,
+    originY,
+    width: map.width,
+    height: map.height,
+    step,
 
-        closedSet.add(getPosKey(current.x, current.y));
+    // Base-1 bounds
+    inBounds(tX, tY) {
+      return tX >= 1 && tY >= 1 && tX <= map.width && tY <= map.height;
+    },
 
-        // 4-way movement (Up, Down, Left, Right in grid space)
-        const neighbors = [
-            { x: current.x, y: current.y - 1 },
-            { x: current.x, y: current.y + 1 },
-            { x: current.x - 1, y: current.y },
-            { x: current.x + 1, y: current.y }
-        ];
+    // Base-1 -> Phaser layer (base-0)
+    getTile(tX, tY) {
+      if (!this.inBounds(tX, tY)) return null;
+      return collisionLayer.getTileAt(tX - 1, tY - 1);
+    },
 
-        for (let n of neighbors) {
-            // Check bounds
-            if (n.x < 0 || n.y < 0 || n.x >= mapRef.width || n.y >= mapRef.height) continue;
-            
-            // Check collisions
-            const tile = collisionLayer.getTileAt(n.x, n.y);
-            if (tile && tile.properties && tile.properties.collides) continue;
+    isBlocked(tX, tY) {
+      const tile = this.getTile(tX, tY);
+      return !!(tile && tile.properties && tile.properties.collides);
+    },
 
-            if (closedSet.has(getPosKey(n.x, n.y))) continue;
+    // Base-1 tile -> world pixels (your iso projection + origin)
+    tileToWorld(tX, tY) {
+      return {
+        x: (tX - tY) * tileW * 0.5 + originX,
+        y: (tX + tY) * tileH * 0.5 + originY
+      };
+    },
 
-            const gScore = current.g + 1;
-            const existingNode = openSet.find(node => node.x === n.x && node.y === n.y);
-
-            if (!existingNode || gScore < existingNode.g) {
-                if (!existingNode) {
-                    openSet.push({
-                        x: n.x, y: n.y, 
-                        g: gScore, 
-                        f: gScore + heuristic(n.x, n.y),
-                        parent: current
-                    });
-                } else {
-                    existingNode.g = gScore;
-                    existingNode.f = gScore + heuristic(n.x, n.y);
-                    existingNode.parent = current;
-                }
-            }
-        }
-    }
-    return null; // No path found
+    // Tiled object pixel position -> base-1 tile coords
+    // Based on your observed behavior:
+    //   first tile anchor is at (step, step) => tile (1,1)
+    objectToTile(objX, objY) {
+      return {
+        x: Math.floor(objX / step),
+        y: Math.floor(objY / step)
+      };
+    }
+  };
 }
 
 // ==========================================
-// DEBUG PATHFINDING MAP
+// LIGHTWEIGHT A* PATHFINDING (BASE-1)
 // ==========================================
-function printDebugMap(collisionLayer, startX, startY, targetX, targetY, path) {
-    const mapWidth = mapRef.width;
-    const mapHeight = mapRef.height;
-    
-    let grid = [];
-    for (let y = 0; y < mapHeight; y++) {
-        let row = [];
-        for (let x = 0; x < mapWidth; x++) {
-            const tile = collisionLayer.getTileAt(x, y);
-            // Check if tile exists and has the collides property
-            if (tile && tile.index !== -1 && tile.properties && tile.properties.collides) { 
-                row.push('x');
-            } else {
-                row.push('.');
-            }
-        }
-        grid.push(row);
-    }
+function findPath(GRID, startX, startY, endX, endY) {
+  const openSet = [{ x: startX, y: startY, g: 0, f: 0, parent: null }];
+  const closedSet = new Set();
 
-    // Overlay Path, Target, and Start (Existing logic...)
-    if (path) path.forEach(node => { if(grid[node.y]) grid[node.y][node.x] = '*'; });
-    if (grid[targetY]) grid[targetY][targetX] = 'q';
-    if (grid[startY]) grid[startY][startX] = 'p';
+  const key = (x, y) => `${x},${y}`;
+  const heuristic = (x, y) => Math.abs(x - endX) + Math.abs(y - endY);
 
-    console.log("--- A* Pathfinding Logical Grid ---");
-    for (let y = 0; y < mapHeight; y++) {
-        // ADDING THE ROW NUMBER HERE prevents console grouping
-        let rowNum = y.toString().padStart(2, '0');
-        console.log(`${rowNum}: ${grid[y].join('  ')}`); 
-    }
-    console.log("-----------------------------------");
+  while (openSet.length > 0) {
+    openSet.sort((a, b) => a.f - b.f);
+    const current = openSet.shift();
+
+    if (current.x === endX && current.y === endY) {
+      const path = [];
+      for (let n = current; n; n = n.parent) path.push({ x: n.x, y: n.y });
+      return path.reverse();
+    }
+
+    closedSet.add(key(current.x, current.y));
+
+    const neighbors = [
+      { x: current.x,     y: current.y - 1 },
+      { x: current.x,     y: current.y + 1 },
+      { x: current.x - 1, y: current.y },
+      { x: current.x + 1, y: current.y }
+    ];
+
+    for (const n of neighbors) {
+      if (!GRID.inBounds(n.x, n.y)) continue;
+      if (GRID.isBlocked(n.x, n.y)) continue;
+      if (closedSet.has(key(n.x, n.y))) continue;
+
+      const gScore = current.g + 1;
+      const existing = openSet.find(node => node.x === n.x && node.y === n.y);
+
+      if (!existing || gScore < existing.g) {
+        if (!existing) {
+          openSet.push({
+            x: n.x, y: n.y,
+            g: gScore,
+            f: gScore + heuristic(n.x, n.y),
+            parent: current
+          });
+        } else {
+          existing.g = gScore;
+          existing.f = gScore + heuristic(n.x, n.y);
+          existing.parent = current;
+        }
+      }
+    }
+  }
+
+  return null;
 }
 
 // ==========================================
-// SCALABLE NPC CLASS (With Path Drawing)
+// DEBUG PATHFINDING MAP (BASE-1 display)
+// ==========================================
+function printDebugMap(GRID, startX, startY, targetX, targetY, path) {
+  const mapWidth = GRID.width;
+  const mapHeight = GRID.height;
+
+  const grid = [];
+
+  for (let y = 1; y <= mapHeight; y++) {
+    const row = [];
+    for (let x = 1; x <= mapWidth; x++) {
+      row.push(GRID.isBlocked(x, y) ? 'x' : '.');
+    }
+    grid.push(row);
+  }
+
+  if (path) {
+    path.forEach(node => {
+      const gx = node.x - 1;
+      const gy = node.y - 1;
+      if (grid[gy] && grid[gy][gx] !== undefined) grid[gy][gx] = '*';
+    });
+  }
+
+  const tGX = targetX - 1, tGY = targetY - 1;
+  if (grid[tGY] && grid[tGY][tGX] !== undefined) grid[tGY][tGX] = 'q';
+
+  const sGX = startX - 1, sGY = startY - 1;
+  if (grid[sGY] && grid[sGY][sGX] !== undefined) grid[sGY][sGX] = 'p';
+
+  console.log("--- A* Pathfinding Logical Grid (base-1 coords) ---");
+  for (let y0 = 0; y0 < mapHeight; y0++) {
+    const rowNum = (y0 + 1).toString().padStart(2, '0');
+    console.log(`${rowNum}: ${grid[y0].join('  ')}`);
+  }
+  console.log("--------------------------------------------------");
+}
+
+
+// ==========================================
+// SCRIBBLE EFFECT FOR PATH INDICATOR (OPTIONAL EXTRA)
+// ==========================================
+
+// ---------- helpers ----------
+function hash01(n) {
+  const s = Math.sin(n) * 10000;
+  return s - Math.floor(s);
+}
+
+function buildScribblePoints(rawPoints, jitterPx = 2, samplesPerSegment = 3, seed = 1234) {
+  if (rawPoints.length < 2) return rawPoints;
+
+  const pts = [];
+
+  for (let i = 0; i < rawPoints.length - 1; i++) {
+    const a = rawPoints[i];
+    const b = rawPoints[i + 1];
+
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len = Math.max(1, Math.hypot(dx, dy));
+
+    const nx = -dy / len;
+    const ny = dx / len;
+
+    for (let s = 0; s < samplesPerSegment; s++) {
+      const t = s / samplesPerSegment;
+
+      const x = a.x + dx * t;
+      const y = a.y + dy * t;
+
+      const fade = Math.sin(Math.PI * t); // 0..1..0
+
+      const r = hash01(seed + i * 100 + s * 17) * 2 - 1; // -1..1
+      const j = r * jitterPx * fade;
+
+      pts.push({ x: x + nx * j, y: y + ny * j });
+    }
+  }
+
+  pts.push(rawPoints[rawPoints.length - 1]);
+  return pts;
+}
+
+function catmullRomInterpolate(points, samples = 3) {
+  if (!points || points.length < 2) return points || [];
+
+  const curve = new Phaser.Curves.Spline(points);
+  const out = [];
+  const total = Math.max(1, points.length * samples);
+
+  for (let i = 0; i <= total; i++) {
+    const t = i / total;
+    const p = curve.getPoint(t);
+    out.push({ x: p.x, y: p.y });
+  }
+  return out;
+}
+
+function decimatePoints(pts, minDist = 8) {
+  if (!pts || pts.length < 2) return pts || [];
+  const out = [pts[0]];
+  let last = pts[0];
+
+  for (let i = 1; i < pts.length - 1; i++) {
+    const p = pts[i];
+    if (Math.hypot(p.x - last.x, p.y - last.y) >= minDist) {
+      out.push(p);
+      last = p;
+    }
+  }
+
+  out.push(pts[pts.length - 1]);
+  return out;
+}
+
+
+ARROW_ALPHA = 0.58;
+
+function strokeMarkerFast(graphics, pts, color = 0x33ff77) {
+  // glow + core (2 passes)
+  const passes = [
+    { w: 10, a: 0.08 },
+    { w:  5, a: ARROW_ALPHA },
+  ];
+
+  for (const pass of passes) {
+    graphics.lineStyle(pass.w, color, pass.a);
+    graphics.beginPath();
+    graphics.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) graphics.lineTo(pts[i].x, pts[i].y);
+    graphics.strokePath();
+  }
+}
+
+// ==========================================
+// NPC CLASS (uses GRID as black box)
 // ==========================================
 class NPC {
-    constructor(scene, startTileX, startTileY, tileWidth, tileHeight, originX, originY) {
-        this.scene = scene;
-        this.tileX = startTileX;
-        this.tileY = startTileY;
-        this.tileW = tileWidth;
-        this.tileH = tileHeight;
-        this.originX = originX;
-        this.originY = originY;
+  constructor(scene, GRID, startTileX, startTileY) {
+    this.pathCacheIdx = 0;    // where along the cached polyline we start drawing
+    this.pathSeed = (Math.random() * 1e9) | 0; // stable per NPC instance
+    this.scene = scene;
+    this.GRID = GRID;
+    this.facing = 'down'; // 'up' | 'down' | 'left' | 'right'
 
-        // Calculate initial isometric position
-        const isoPos = this.getIsoPos(this.tileX, this.tileY);
-        
-        // Create the sprite
-        this.sprite = scene.add.sprite(isoPos.x, isoPos.y, 'npc_sprite', 15);
-        this.sprite.setOrigin(0.5, 1);
+    this.tileX = startTileX; // base-1
+    this.tileY = startTileY; // base-1
 
-        // --- NEW: Create a graphics object to draw the path ---
-        this.pathGraphics = scene.add.graphics();
-        this.pathGraphics.setDepth(10000); // High depth so it draws over walls/floors like a UI layer
+    const pos = GRID.tileToWorld(this.tileX, this.tileY);
 
-        // State Machine
-        this.state = 'WAITING';
-        this.path = [];
-        this.targetNode = null;
-        this.speed = 1;
+    this.sprite = scene.add.sprite(pos.x, pos.y, 'npc_sprite', 15);
+    this.sprite.setOrigin(0.5, 1);
 
-        // Start the behavior loop
-        this.startWaiting();
-    }
+    this.pathSegments = [];     // pool of graphics segments
+    this.arrowG = null;         // arrowhead graphics
+    this.pathDirty = true;      // rebuild when path changes
+    this.pathCache = null;      // cached smoothed points
 
-    getIsoPos(tX, tY) {
-        return {
-            // Not sure why + 16 and + 32 this just fixed a bug I have no idea why :(
-            x: (tX - tY) * this.tileW * 0.5 + 16,
-            y: (tX + tY) * this.tileH * 0.5 + 32
-        };
-    }
+    this.state = 'WAITING';
+    this.setIdleFacing();
+    this.path = [];
+    this.targetNode = null;
+    this.speed = 1;
 
-    startWaiting() {
-        this.state = 'WAITING';
-        this.sprite.anims.stop(); 
-        
-        // Wait 4 seconds, then pick a new goal
-        this.scene.time.delayedCall(4000, () => {
-            this.pickRandomGoal();
-        });
-    }
+    this.startWaiting();
+  }
 
-    pickRandomGoal() {
-        let attempts = 0;
-        let goalX, goalY, path;
+  startWaiting() {
+    this.state = 'WAITING';
+    this.setIdleFacing();
 
-        while (attempts < 10) {
-            goalX = Phaser.Math.Between(0, mapRef.width - 1);
-            goalY = Phaser.Math.Between(0, mapRef.height - 1);
+    this.scene.time.delayedCall(4000, () => {
+      this.pickRandomGoal();
+    });
+  }
 
-            const tile = collisionLayer.getTileAt(goalX, goalY);
-            if (!tile || !tile.properties || !tile.properties.collides) {
-                path = findPath(this.tileX, this.tileY, goalX, goalY);
-                if (path && path.length > 1) {
-                    
-                    // printDebugMap(collisionLayer, this.tileX, this.tileY, goalX, goalY, path);
+  pickRandomGoal() {
+    let attempts = 0;
 
-                    this.path = path;
-                    this.path.shift(); 
-                    this.targetNode = this.path.shift();
-                    this.state = 'MOVING';
-                    return; 
-                }
-            }
-            attempts++;
-        }
-        
-        this.startWaiting();
-    }
+    while (attempts++ < 10) {
+      const goalX = Phaser.Math.Between(1, this.GRID.width);
+      const goalY = Phaser.Math.Between(1, this.GRID.height);
 
-    update() {
-        // --- NEW: Clear the path graphics every frame ---
-        this.pathGraphics.clear();
+      if (!this.GRID.isBlocked(goalX, goalY)) {
+        const path = findPath(this.GRID, this.tileX, this.tileY, goalX, goalY);
+        if (path && path.length > 1) {
+          // printDebugMap(this.GRID, this.tileX, this.tileY, goalX, goalY, path);
+          this.pathSeed = (this.pathSeed ^ (goalX * 73856093) ^ (goalY * 19349663)) | 0;
+          this.path = path;
+          this.path.shift();          // remove current tile
+          this.targetNode = this.path.shift();
+          this.state = 'MOVING';
+          this.pathCache = null;
+          this.pathCacheIdx = 0;
+          return;
+        }
+      }
+    }
 
-        if (this.state !== 'MOVING' || !this.targetNode) {
-            this.sprite.setDepth(this.sprite.y);
-            return;
-        }
+    this.startWaiting();
+  }
 
-        const targetIso = this.getIsoPos(this.targetNode.x, this.targetNode.y);
+  setIdleFacing() {
+    const key =
+        this.facing === 'right' ? 'npc_walk_right' :
+        this.facing === 'left'  ? 'npc_walk_left'  :
+        this.facing === 'up'    ? 'npc_walk_up'    :
+                                'npc_walk_down';
 
-        // --- NEW: Draw the path ---
-        this.drawPathIndicator(targetIso);
+    // Ensure the correct sheet/frames are applied, then freeze on frame 0 (idle)
+    this.sprite.anims.play(key, true);
+    this.sprite.anims.pause();
+    this.sprite.anims.setProgress(0); // first frame is idle
+  }
 
-        const distance = Phaser.Math.Distance.Between(this.sprite.x, this.sprite.y, targetIso.x, targetIso.y);
+  update() {
+    if (this.state !== 'MOVING' || !this.targetNode) {
+        for (const g of this.pathSegments) g.setVisible(false);
+        if (this.arrowG) this.arrowG.setVisible(false);
+        this.sprite.setDepth(this.sprite.y);
+        return;
+    }
 
-        if (distance < this.speed) {
-            // Reached the current tile
-            this.sprite.x = targetIso.x;
-            this.sprite.y = targetIso.y;
-            this.tileX = this.targetNode.x;
-            this.tileY = this.targetNode.y;
+    // ---- MOVE FIRST ----
+    const targetWorld = this.GRID.tileToWorld(this.targetNode.x, this.targetNode.y);
 
-            if (this.path.length > 0) {
-                this.targetNode = this.path.shift();
-            } else {
-                this.targetNode = null;
-                this.startWaiting();
-            }
-        } else {
-            // Move towards target
-            const angle = Phaser.Math.Angle.Between(this.sprite.x, this.sprite.y, targetIso.x, targetIso.y);
-            this.sprite.x += Math.cos(angle) * this.speed;
-            this.sprite.y += Math.sin(angle) * this.speed;
+    const distance = Phaser.Math.Distance.Between(
+        this.sprite.x, this.sprite.y,
+        targetWorld.x, targetWorld.y
+    );
 
-            // Handle Animations
-            if (this.targetNode.x > this.tileX) {
-                this.sprite.anims.play('npc_walk_right', true);
-            } else if (this.targetNode.x < this.tileX) {
-                this.sprite.anims.play('npc_walk_left', true);
-            } else if (this.targetNode.y > this.tileY) {
-                this.sprite.anims.play('npc_walk_down', true); 
-            } else if (this.targetNode.y < this.tileY) {
-                this.sprite.anims.play('npc_walk_up', true);  
-            }
-        }
+    if (distance < this.speed) {
+        this.sprite.x = targetWorld.x;
+        this.sprite.y = targetWorld.y;
+        this.tileX = this.targetNode.x;
+        this.tileY = this.targetNode.y;
 
-        this.sprite.setDepth(this.sprite.y);
-    }
+        if (this.path.length > 0) {
+            this.targetNode = this.path.shift();
+        } else {
+            this.targetNode = null;
 
-    // --- NEW: Helper method to handle all the drawing logic ---
-    drawPathIndicator(targetIso) {
-        this.pathGraphics.lineStyle(2, 0xffaa00, 0.8);
-        this.pathGraphics.beginPath();
+            // clear indicator cache immediately
+            this.pathCache = null;
+            this.pathCacheIdx = 0;
 
-        // --- NEW: The offset to raise the line from the bottom edge to the tile center ---
-        // Subtracting half the tile height lifts the visual line to the center of the diamond
-        const yOffset = this.tileH * 0.5;
+            this.startWaiting();
+        }
+    } else {
+        const angle = Phaser.Math.Angle.Between(
+        this.sprite.x, this.sprite.y,
+        targetWorld.x, targetWorld.y
+        );
 
-        // 1. Start exactly where the NPC is standing, but shifted up
-        this.pathGraphics.moveTo(this.sprite.x, this.sprite.y - yOffset);
+        this.sprite.x += Math.cos(angle) * this.speed;
+        this.sprite.y += Math.sin(angle) * this.speed;
 
-        // 2. Draw line to the immediate next node (shifted up)
-        this.pathGraphics.lineTo(targetIso.x, targetIso.y - yOffset);
+        // Animations + facing based on next tile direction
+        if (this.targetNode.x > this.tileX) { this.facing = 'right'; this.sprite.anims.play('npc_walk_right', true); }
+        else if (this.targetNode.x < this.tileX) { this.facing = 'left'; this.sprite.anims.play('npc_walk_left', true); }
+        else if (this.targetNode.y > this.tileY) { this.facing = 'down'; this.sprite.anims.play('npc_walk_down', true); }
+        else if (this.targetNode.y < this.tileY) { this.facing = 'up'; this.sprite.anims.play('npc_walk_up', true); }
+    }
 
-        // 3. Draw lines to all remaining nodes in the path array
-        let lastNode = { x: targetIso.x, y: targetIso.y - yOffset };
-        for (let i = 0; i < this.path.length; i++) {
-            const isoNode = this.getIsoPos(this.path[i].x, this.path[i].y);
-            
-            // Apply the offset to every point on the path
-            const adjustedX = isoNode.x;
-            const adjustedY = isoNode.y - yOffset;
-            
-            this.pathGraphics.lineTo(adjustedX, adjustedY);
-            lastNode = { x: adjustedX, y: adjustedY };
-        }
-        
-        this.pathGraphics.strokePath();
+    // ---- THEN DRAW, USING UPDATED POS + UPDATED TARGET ----
+    if (this.targetNode) {
+        const nextWorld = this.GRID.tileToWorld(this.targetNode.x, this.targetNode.y);
+        this.drawPathIndicator(nextWorld);
+    } else {
+        this.drawPathIndicator(null);
+    }
 
-        // 4. Calculate the angle for the arrowhead
-        let prevNode = { x: this.sprite.x, y: this.sprite.y - yOffset };
-        if (this.path.length > 0) {
-            if (this.path.length > 1) {
-                const pNode = this.getIsoPos(this.path[this.path.length - 2].x, this.path[this.path.length - 2].y);
-                prevNode = { x: pNode.x, y: pNode.y - yOffset };
-            } else {
-                prevNode = { x: targetIso.x, y: targetIso.y - yOffset };
-            }
-        }
+    this.sprite.setDepth(this.sprite.y);
+  }
 
-        const finalAngle = Phaser.Math.Angle.Between(prevNode.x, prevNode.y, lastNode.x, lastNode.y);
+  drawPathIndicator(nextWorld) {
+    const color = 0x33ff77;
+    const yOffset = this.GRID.tileH * 0.5;
 
-        // 5. Draw the arrowhead at 'lastNode'
-        const arrowSize = 8;
-        this.pathGraphics.fillStyle(0xffaa00, 0.8);
-        this.pathGraphics.beginPath();
-        this.pathGraphics.moveTo(lastNode.x, lastNode.y);
-        
-        // Left point of arrow
-        this.pathGraphics.lineTo(
-            lastNode.x - arrowSize * Math.cos(finalAngle - Math.PI / 6),
-            lastNode.y - arrowSize * Math.sin(finalAngle - Math.PI / 6)
-        );
-        // Right point of arrow
-        this.pathGraphics.lineTo(
-            lastNode.x - arrowSize * Math.cos(finalAngle + Math.PI / 6),
-            lastNode.y - arrowSize * Math.sin(finalAngle + Math.PI / 6)
-        );
-        
-        this.pathGraphics.closePath();
-        this.pathGraphics.fillPath();
-    }
+    // Ensure fields exist (safe even if you didn’t add them in constructor yet)
+    if (this.lastPathDraw === undefined) this.lastPathDraw = 0;
+    if (this.pathSeed === undefined) this.pathSeed = ((Math.random() * 1e9) | 0);
+    if (this.pathCacheIdx === undefined) this.pathCacheIdx = 0;
+
+    // If no target, hide and exit
+    if (!nextWorld) {
+        for (const g of this.pathSegments) g.setVisible(false);
+        if (this.arrowG) this.arrowG.setVisible(false);
+        return;
+    }
+
+    // Start point anchored to *current* sprite position
+    const startPt = { x: this.sprite.x, y: this.sprite.y - yOffset };
+
+    // Throttle drawing (but we still keep visibility correct)
+    const now = this.scene.time.now;
+    const canRedraw = (now - this.lastPathDraw) >= 50; // 20 FPS-ish
+    if (canRedraw) this.lastPathDraw = now;
+
+    // ------------------------------------------------------------
+    // 1) Build the scribbled/smoothed polyline ONLY when pathDirty
+    //    (stable seed => stable curves for the life of this path)
+    // ------------------------------------------------------------
+    if ((this.pathDirty || !this.pathCache) && canRedraw) {
+        const raw = [];
+        raw.push(startPt);
+
+        // Always include the immediate next node
+        const first = { x: nextWorld.x, y: nextWorld.y - yOffset };
+        raw.push(first);
+
+        // Cap by pixel length so huge paths don’t lag
+        const MAX_PIXELS = 500; // tune 300–700
+        let acc = 0;
+        let last = first;
+
+        for (let i = 0; i < this.path.length; i++) {
+        const wp = this.GRID.tileToWorld(this.path[i].x, this.path[i].y);
+        const pt = { x: wp.x, y: wp.y - yOffset };
+
+        acc += Math.hypot(pt.x - last.x, pt.y - last.y);
+        if (acc > MAX_PIXELS) break;
+
+        raw.push(pt);
+        last = pt;
+        }
+
+        const nodeCount = raw.length;
+
+        // Adaptive sampling
+        const samplesPerSegment = nodeCount > 20 ? 2 : nodeCount > 12 ? 3 : 5;
+        const splineSamples     = nodeCount > 20 ? 2 : nodeCount > 12 ? 3 : 5;
+
+        // IMPORTANT: stable seed (do NOT use sprite position)
+        // Set this.pathSeed when you pick a new goal/path, e.g.:
+        // this.pathSeed = (this.pathSeed ^ (goalX*73856093) ^ (goalY*19349663)) | 0;
+        const jittered = buildScribblePoints(raw, /*jitterPx*/ 2, samplesPerSegment, this.pathSeed);
+        const smooth   = catmullRomInterpolate(jittered, splineSamples);
+
+        const minDist = nodeCount > 20 ? 10 : 8;
+        this.pathCache = decimatePoints(smooth, minDist);
+
+        // reset trimming position when a new cached curve is built
+        this.pathCacheIdx = 0;
+
+        this.pathDirty = false;
+    }
+
+    // If we have no cache yet (throttled on first frame), just bail gracefully
+    if (!this.pathCache || this.pathCache.length < 2) return;
+
+    // ------------------------------------------------------------
+    // 2) While moving, TRIM along the cached polyline
+    //    so the start follows the NPC WITHOUT changing the curve.
+    // ------------------------------------------------------------
+    // Advance idx until the next point is "far enough" from the sprite.
+    // This keeps the start from trailing behind.
+    while (this.pathCacheIdx < this.pathCache.length - 2) {
+        const pNext = this.pathCache[this.pathCacheIdx + 1];
+        const d = Phaser.Math.Distance.Between(startPt.x, startPt.y, pNext.x, pNext.y);
+        if (d > 12) break; // tune 8–16
+        this.pathCacheIdx++;
+    }
+
+    // Slice visible portion; force first point to be exactly at sprite
+    const pts = this.pathCache.slice(this.pathCacheIdx);
+    if (pts.length < 2) return;
+    pts[0] = startPt;
+
+    // ------------------------------------------------------------
+    // 3) Draw chunked segments (your existing performance strategy)
+    // ------------------------------------------------------------
+    for (const g of this.pathSegments) g.setVisible(false);
+
+    const MAX_LEN = 150;
+    let segIndex = 0;
+    let chunk = [pts[0]];
+    let accLen = 0;
+
+    for (let i = 1; i < pts.length; i++) {
+        const prev = pts[i - 1];
+        const cur = pts[i];
+        accLen += Math.hypot(cur.x - prev.x, cur.y - prev.y);
+        chunk.push(cur);
+
+        const isLast = (i === pts.length - 1);
+
+        if (accLen >= MAX_LEN || isLast) {
+        let g = this.pathSegments[segIndex];
+        if (!g) {
+            g = this.scene.add.graphics();
+            this.pathSegments.push(g);
+        }
+        segIndex++;
+
+        g.clear();
+        g.setVisible(true);
+
+        // depth by average y of chunk
+        let sumY = 0;
+        for (const p of chunk) sumY += p.y;
+        g.setDepth(sumY / chunk.length);
+
+        strokeMarkerFast(g, chunk, color);
+
+        chunk = [cur];
+        accLen = 0;
+        }
+    }
+
+    for (let k = segIndex; k < this.pathSegments.length; k++) {
+        this.pathSegments[k].setVisible(false);
+    }
+
+    // ------------------------------------------------------------
+    // 4) Arrowhead
+    // ------------------------------------------------------------
+    const lastPt = pts[pts.length - 1];
+    const prevPt = pts[pts.length - 2];
+    const angle = Phaser.Math.Angle.Between(prevPt.x, prevPt.y, lastPt.x, lastPt.y);
+
+    if (!this.arrowG) this.arrowG = this.scene.add.graphics();
+    this.arrowG.clear();
+    this.arrowG.setVisible(true);
+    this.arrowG.setDepth(lastPt.y + 1);
+
+    const arrowSize = 10;
+    this.arrowG.lineStyle(4, color, ARROW_ALPHA);
+    this.arrowG.beginPath();
+    this.arrowG.moveTo(lastPt.x, lastPt.y);
+    this.arrowG.lineTo(
+        lastPt.x - arrowSize * Math.cos(angle - Math.PI / 6),
+        lastPt.y - arrowSize * Math.sin(angle - Math.PI / 6)
+    );
+    this.arrowG.moveTo(lastPt.x, lastPt.y);
+    this.arrowG.lineTo(
+        lastPt.x - arrowSize * Math.cos(angle + Math.PI / 6),
+        lastPt.y - arrowSize * Math.sin(angle + Math.PI / 6)
+    );
+    this.arrowG.strokePath();
+  }
 }
 
 // ==========================================
 // SCENE 1: BOOT SCENE
 // ==========================================
 const bootScene = {
-    key: 'BootScene',
-    preload: function () {
-        this.load.tilemapTiledJSON('map', 'map.json');
-    },
-    create: function () {
-        this.scene.start('MainScene');
-    }
+  key: 'BootScene',
+  preload: function () {
+    this.load.tilemapTiledJSON('map', 'map.json');
+  },
+  create: function () {
+    this.scene.start('MainScene');
+  }
 };
 
 // ==========================================
 // SCENE 2: MAIN SCENE
 // ==========================================
 const mainScene = {
-    key: 'MainScene',
-    
-    preload: function () {
-        const mapData = this.cache.tilemap.get('map').data;
-        mapData.tilesets.forEach(ts => {
-            const filename = ts.image.split(/[\/\\]/).pop();
-            const assetPath = 'assets/' + filename;
-            this.load.spritesheet(ts.name, assetPath, {
-                frameWidth: ts.tilewidth,
-                frameHeight: ts.tileheight
-            });
-        });
+  key: 'MainScene',
 
-        // Load NPC Spritesheet
-        this.load.spritesheet('npc_sprite', 'assets/person_tiles.png', {
-            frameWidth: 32,
-            frameHeight: 32
-        });
-    },
+  preload: function () {
+    const mapData = this.cache.tilemap.get('map').data;
 
-    create: function () {
-        const map = this.make.tilemap({ key: 'map' });
-        mapRef = map; // Store globally for pathfinding
-        
-        map.tilesets.forEach(ts => {
-            map.addTilesetImage(ts.name, ts.name);
-        });
+    // Load tilesets as spritesheets
+    mapData.tilesets.forEach(ts => {
+      const filename = ts.image.split(/[\/\\]/).pop();
+      const assetPath = 'assets/' + filename;
+      this.load.spritesheet(ts.name, assetPath, {
+        frameWidth: ts.tilewidth,
+        frameHeight: ts.tileheight
+      });
+    });
 
-        const tileset = map.tilesets;
+    // NPC spritesheet
+    this.load.spritesheet('npc_sprite', 'assets/person_tiles.png', {
+      frameWidth: 32,
+      frameHeight: 32
+    });
+  },
 
-        // 1. Floor & Collision Layers
-        const floorLayer = map.createLayer('floors', tileset);
-        if (floorLayer) floorLayer.setDepth(-1000);
+  create: function () {
+    const map = this.make.tilemap({ key: 'map' });
+    mapRef = map;
 
-        collisionLayer = map.createLayer('collides', tileset);
-        if (collisionLayer) collisionLayer.setVisible(false);
+    map.tilesets.forEach(ts => {
+      map.addTilesetImage(ts.name, ts.name);
+    });
 
-        // Setup Isometric Projection Variables
-        const tileWidth = map.tileWidth;
-        const tileHeight = map.tileHeight;
-        const originX = 16;
-        const originY = 16;
+    const tileset = map.tilesets;
 
-        const gidMap = {};
-        map.tilesets.forEach(ts => {
-            for (let i = 0; i < ts.total; i++) {
-                gidMap[ts.firstgid + i] = { key: ts.name, frame: i };
-            }
-        });
+    // Layers
+    const floorLayer = map.createLayer('floors', tileset);
+    if (floorLayer) floorLayer.setDepth(-1000);
 
-        const createIsoSprite = (object) => {
-            const mappedInfo = gidMap[object.gid];
-            if (!mappedInfo) return null;
+    collisionLayer = map.createLayer('collides', tileset);
+    if (collisionLayer) collisionLayer.setVisible(false);
 
-            const tileX = object.x / tileHeight;
-            const tileY = object.y / tileHeight;
-            const isoX = (tileX - tileY) * tileWidth * 0.5 + originX;
-            const isoY = (tileX + tileY) * tileHeight * 0.5 + originY;
+    // Your chosen world origin for iso projection
+    const originX = 16;
+    const originY = 16;
 
-            const sprite = this.add.sprite(isoX, isoY, mappedInfo.key, mappedInfo.frame);
-            sprite.setOrigin(0.5, 1);
+    // Build the single source-of-truth adapter
+    GRID = makeGridIso(map, collisionLayer, originX, originY);
 
-            let depthOffset = 0;
-            if (object.properties) {
-                if (Array.isArray(object.properties)) {
-                    const prop = object.properties.find(p => p.name.toLowerCase() === 'depthoffset');
-                    if (prop) depthOffset = prop.value;
-                } else if (object.properties.DepthOffset !== undefined) {
-                    depthOffset = object.properties.DepthOffset;
-                }
-            }
+    // gid -> (key, frame)
+    const gidMap = {};
+    map.tilesets.forEach(ts => {
+      for (let i = 0; i < ts.total; i++) {
+        gidMap[ts.firstgid + i] = { key: ts.name, frame: i };
+      }
+    });
 
-            sprite.setDepth(sprite.y - depthOffset);
-            return sprite;
-        };
+    // Create isometric sprite from a Tiled tile-object (gid)
+    const createIsoSprite = (object) => {
+      const mappedInfo = gidMap[object.gid];
+      if (!mappedInfo) return null;
 
-        // 2. Create Walls
-        const wallObjects = map.getObjectLayer('walls')?.objects || [];
-        wallSprites = [];
-        wallObjects.forEach(object => {
-            const sprite = createIsoSprite(object);
-            if (sprite) wallSprites.push(sprite);
-        });
+      // Convert snapped object position -> base-1 tile coords
+      const t = GRID.objectToTile(object.x, object.y);
 
-        // 3. Mascot Setup
-        const playerObjects = map.getObjectLayer('Player')?.objects || [];
-        if (playerObjects.length > 0) {
-            mascot = createIsoSprite(playerObjects[0]);
-            if (mascot) {
-                this.cameras.main.startFollow(mascot, true, 0.1, 0.1);
-            }
-        }
+      // Convert tile coords -> world
+      const p = GRID.tileToWorld(t.x, t.y);
 
-        // 4. Input
-        cursors = this.input.keyboard.createCursorKeys();
+      const sprite = this.add.sprite(p.x, p.y, mappedInfo.key, mappedInfo.frame);
+      sprite.setOrigin(0.5, 1);
 
-        // ------------------------------------------
-        // NPC SYSTEM SETUP
-        // ------------------------------------------
+      let depthOffset = 0;
+      if (object.properties) {
+        if (Array.isArray(object.properties)) {
+          const prop = object.properties.find(p => p.name.toLowerCase() === 'depthoffset');
+          if (prop) depthOffset = prop.value;
+        } else if (object.properties.DepthOffset !== undefined) {
+          depthOffset = object.properties.DepthOffset;
+        }
+      }
 
-        // Define Animations
-        this.anims.create({ key: 'npc_walk_down', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 0, end: 4 }), frameRate: 8, repeat: -1 });
-        this.anims.create({ key: 'npc_walk_right', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 5, end: 9 }), frameRate: 8, repeat: -1 });
-        this.anims.create({ key: 'npc_walk_up', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
-        this.anims.create({ key: 'npc_walk_left', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
+      sprite.setDepth(sprite.y - depthOffset);
+      return sprite;
+    };
 
-        // Grab spawner objects
-        const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
-        
-        if (spawnerObjects.length > 0) {
-            // Set EXACTLY how many NPCs you want in your game
-            const maxNPCs = 10; // Change this number to whatever you need!
+    // Walls
+    const wallObjects = map.getObjectLayer('walls')?.objects || [];
+    wallSprites = [];
+    wallObjects.forEach(obj => {
+      const s = createIsoSprite(obj);
+      if (s) wallSprites.push(s);
+    });
 
-            for (let i = 0; i < maxNPCs; i++) {
-                // Pick a random spawner from the array for THIS specific NPC
-                // Because it picks randomly every loop, multiple NPCs can get the same spawner
-                const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
-                
-                // Convert pixel coordinates from Tiled into tile indices
-                const startTileX = Math.floor(spawner.x / tileHeight)-1;
-                const startTileY = Math.floor(spawner.y / tileHeight)-1;
+    // Player
+    const playerObjects = map.getObjectLayer('Player')?.objects || [];
+    if (playerObjects.length > 0) {
+      mascot = createIsoSprite(playerObjects[0]);
+      if (mascot) this.cameras.main.startFollow(mascot, true, 0.1, 0.1);
+    }
 
-                const newNPC = new NPC(this, startTileX, startTileY, tileWidth, tileHeight, originX, originY);
-                npcs.push(newNPC);
-            }
-        }
-    },
+    // Input
+    cursors = this.input.keyboard.createCursorKeys();
 
-    update: function () {
-        // Update all NPCs
-        npcs.forEach(npc => npc.update());
+    // NPC animations
+    this.anims.create({ key: 'npc_walk_down',  frames: this.anims.generateFrameNumbers('npc_sprite', { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_right', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_up',    frames: this.anims.generateFrameNumbers('npc_sprite', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_left',  frames: this.anims.generateFrameNumbers('npc_sprite', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
 
-        // Mascot Movement (Your original code)
-        if (!mascot || !collisionLayer) return;
+    // Spawn NPCs
+    const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
+    npcs = [];
 
-        const speed = 2;
-        let vx = 0;
-        let vy = 0;
+    if (spawnerObjects.length > 0) {
+      const maxNPCs = 10;
 
-        if (cursors.left.isDown)  { vx = -speed; vy = -speed / 2; }
-        else if (cursors.right.isDown) { vx = speed;  vy = speed / 2; }
-        else if (cursors.up.isDown)    { vx = speed;  vy = -speed / 2; }
-        else if (cursors.down.isDown)  { vx = -speed; vy = speed / 2; }
+      for (let i = 0; i < maxNPCs; i++) {
+        const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
 
-        const nextX = mascot.x + vx;
-        const nextY = mascot.y + vy;
+        // Convert spawner object position -> base-1 tile coords with the shared rules
+        const t = GRID.objectToTile(spawner.x, spawner.y);
 
-        const offsetX = 14; 
-        const offsetY = 7; 
-        const checkPoints = [
-            { x: nextX, y: nextY },
-            { x: nextX - offsetX, y: nextY - offsetY },
-            { x: nextX + offsetX, y: nextY - offsetY },
-            { x: nextX, y: nextY - 2 * offsetY }
-        ];
+        npcs.push(new NPC(this, GRID, t.x, t.y));
+      }
+    }
+  },
 
-        let isBlocked = false;
-        for (let p of checkPoints) {
-            const tile = collisionLayer.getTileAtWorldXY(p.x, p.y);
-            if (tile && tile.properties.collides) {
-                isBlocked = true;
-                break;
-            }
-        }
+  update: function () {
+    // Update NPCs
+    npcs.forEach(npc => npc.update());
 
-        if (!isBlocked) {
-            mascot.x = nextX;
-            mascot.y = nextY;
-        }
+    // Player movement
+    if (!mascot || !collisionLayer) return;
 
-        mascot.setDepth(mascot.y);
-    }
+    const speed = 2;
+    let vx = 0;
+    let vy = 0;
+
+    if (cursors.left.isDown)       { vx = -speed; vy = -speed / 2; }
+    else if (cursors.right.isDown) { vx =  speed; vy =  speed / 2; }
+    else if (cursors.up.isDown)    { vx =  speed; vy = -speed / 2; }
+    else if (cursors.down.isDown)  { vx = -speed; vy =  speed / 2; }
+
+    const nextX = mascot.x + vx;
+    const nextY = mascot.y + vy;
+
+    const offsetX = 14;
+    const offsetY = 7;
+    const checkPoints = [
+      { x: nextX, y: nextY },
+      { x: nextX - offsetX, y: nextY - offsetY },
+      { x: nextX + offsetX, y: nextY - offsetY },
+      { x: nextX, y: nextY - 2 * offsetY }
+    ];
+
+    let isBlocked = false;
+    for (const p of checkPoints) {
+      const tile = collisionLayer.getTileAtWorldXY(p.x, p.y);
+      if (tile && tile.properties && tile.properties.collides) {
+        isBlocked = true;
+        break;
+      }
+    }
+
+    if (!isBlocked) {
+      mascot.x = nextX;
+      mascot.y = nextY;
+    }
+
+    mascot.setDepth(mascot.y);
+  }
 };
 
 // ==========================================
 // GAME CONFIGURATION
 // ==========================================
 const config = {
-    type: Phaser.AUTO,
-    width: 800,
-    height: 600,
-    parent: 'game-container',
-    pixelArt: true,
-    scene: [bootScene, mainScene] 
+  type: Phaser.AUTO,
+  width: 800,
+  height: 600,
+  parent: 'game-container',
+  pixelArt: true,
+  scene: [bootScene, mainScene]
 };
 
-const game = new Phaser.Game(config);
+new Phaser.Game(config);
