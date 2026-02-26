@@ -145,8 +145,9 @@ class NPC {
 
     getIsoPos(tX, tY) {
         return {
-            x: (tX - tY) * this.tileW * 0.5 + this.originX,
-            y: (tX + tY) * this.tileH * 0.5 + this.originY
+            // Not sure why + 16 and + 32 this just fixed a bug I have no idea why :(
+            x: (tX - tY) * this.tileW * 0.5 + 16,
+            y: (tX + tY) * this.tileH * 0.5 + 32
         };
     }
 
@@ -173,7 +174,7 @@ class NPC {
                 path = findPath(this.tileX, this.tileY, goalX, goalY);
                 if (path && path.length > 1) {
                     
-                    printDebugMap(collisionLayer, this.tileX, this.tileY, goalX, goalY, path);
+                    // printDebugMap(collisionLayer, this.tileX, this.tileY, goalX, goalY, path);
 
                     this.path = path;
                     this.path.shift(); 
@@ -431,7 +432,7 @@ const mainScene = {
         
         if (spawnerObjects.length > 0) {
             // Set EXACTLY how many NPCs you want in your game
-            const maxNPCs = 1; // Change this number to whatever you need!
+            const maxNPCs = 10; // Change this number to whatever you need!
 
             for (let i = 0; i < maxNPCs; i++) {
                 // Pick a random spawner from the array for THIS specific NPC
@@ -439,8 +440,8 @@ const mainScene = {
                 const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
                 
                 // Convert pixel coordinates from Tiled into tile indices
-                const startTileX = Math.floor(spawner.x / tileHeight);
-                const startTileY = Math.floor(spawner.y / tileHeight);
+                const startTileX = Math.floor(spawner.x / tileHeight)-1;
+                const startTileY = Math.floor(spawner.y / tileHeight)-1;
 
                 const newNPC = new NPC(this, startTileX, startTileY, tileWidth, tileHeight, originX, originY);
                 npcs.push(newNPC);
