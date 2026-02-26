@@ -64,6 +64,7 @@ import {
 
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY) {
+    this.id = (NPC._idCounter = (NPC._idCounter || 0) + 1);
     this.pathCacheIdx = 0;
     this.pathSeed = (Math.random() * 1e9) | 0;
     this.scene = scene;

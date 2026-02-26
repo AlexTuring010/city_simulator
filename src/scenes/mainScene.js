@@ -21,7 +21,7 @@ export const mainScene = {
   cursors: null,
   collisionLayer: null,
   wallSprites: [],
-  npcs: [],
+  npcs: {},
   mapRef: null,
   GRID: null,
 
@@ -129,7 +129,7 @@ export const mainScene = {
 
     // Spawn NPCs
     const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
-    this.npcs = [];
+    this.npcs = {};
 
     if (spawnerObjects.length > 0) {
       const maxNPCs = 100;
@@ -143,14 +143,14 @@ export const mainScene = {
         const npc = new NPC(this, this.GRID, t.x, t.y);
         npc.controller = new RandomWanderController(this, npc, this.GRID);
 
-        this.npcs.push(npc);
+        this.npcs[npc.id] = npc;
       }
     }
   },
 
   update() {
     // Update NPCs
-    this.npcs.forEach(npc => npc.update());
+    Object.values(this.npcs).forEach(npc => npc.update());
 
     // Player movement
     if (!this.mascot || !this.collisionLayer) return;
