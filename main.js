@@ -340,9 +340,9 @@ const mainScene = {
         });
     },
 
-    create: function () {
-        const map = this.make.tilemap({ key: 'map' });
-        mapRef = map; // Store globally for pathfinding
+	    create: function () {
+	        const map = this.make.tilemap({ key: 'map' });
+	        mapRef = map; // Store globally for pathfinding
         
         map.tilesets.forEach(ts => {
             map.addTilesetImage(ts.name, ts.name);
@@ -358,10 +358,17 @@ const mainScene = {
         if (collisionLayer) collisionLayer.setVisible(false);
 
         // Setup Isometric Projection Variables
-        const tileWidth = map.tileWidth;
-        const tileHeight = map.tileHeight;
-        const originX = 16;
-        const originY = 16;
+	        const tileWidth = map.tileWidth;
+	        const tileHeight = map.tileHeight;
+	        const originX = 16;
+	        const originY = 16;
+
+	        const tiledObjectToGrid = (x, y) => {
+	            return {
+	                tileX: Math.floor((x - originX) / tileHeight),
+	                tileY: Math.floor((y - originY) / tileHeight)
+	            };
+	        };
 
         const gidMap = {};
         map.tilesets.forEach(ts => {
@@ -374,10 +381,9 @@ const mainScene = {
             const mappedInfo = gidMap[object.gid];
             if (!mappedInfo) return null;
 
-            const tileX = object.x / tileHeight;
-            const tileY = object.y / tileHeight;
-            const isoX = (tileX - tileY) * tileWidth * 0.5 + originX;
-            const isoY = (tileX + tileY) * tileHeight * 0.5 + originY;
+	            const { tileX, tileY } = tiledObjectToGrid(object.x, object.y);
+	            const isoX = (tileX - tileY) * tileWidth * 0.5 + originX;
+	            const isoY = (tileX + tileY) * tileHeight * 0.5 + originY;
 
             const sprite = this.add.sprite(isoX, isoY, mappedInfo.key, mappedInfo.frame);
             sprite.setOrigin(0.5, 1);
@@ -439,8 +445,7 @@ const mainScene = {
                 const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
                 
                 // Convert pixel coordinates from Tiled into tile indices
-                const startTileX = Math.floor(spawner.x / tileHeight);
-                const startTileY = Math.floor(spawner.y / tileHeight);
+	                const { tileX: startTileX, tileY: startTileY } = tiledObjectToGrid(spawner.x, spawner.y);
 
                 const newNPC = new NPC(this, startTileX, startTileY, tileWidth, tileHeight, originX, originY);
                 npcs.push(newNPC);
