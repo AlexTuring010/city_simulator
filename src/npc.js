@@ -53,6 +53,12 @@ export class NPC {
     this._waitTimer = null;
     this._goal = null; // {x,y} of the final destination (optional)
 
+    // -----------------------------------------
+    // Path indicator options (per-goal configurable)
+    // -----------------------------------------
+    this.showPathIndicator = true;     // can be toggled per goToTile()
+    this.pathIndicatorColor = 0x33ff77; // can be set per goToTile()
+
     this.setIdleFacing();
   }
 
@@ -86,6 +92,10 @@ export class NPC {
     this.pathCacheIdx = 0;
     this.pathDirty = true;
 
+    // When stopping, also hide indicator immediately
+    for (const g of this.pathSegments) g.setVisible(false);
+    if (this.arrowG) this.arrowG.setVisible(false);
+
     this.setIdleFacing();
     this.events.emit('stateChanged', this.state);
     this.events.emit('stopped', { reason });
@@ -108,7 +118,33 @@ export class NPC {
     return true;
   }
 
-  goToTile(goalX, goalY, { allowBlocked = false } = {}) {
+  /**
+   * Go to a tile.
+   *
+   * Options:
+   * - allowBlocked: if true, allow goal even if blocked
+   * - showIndicator: if false, do NOT render path/arrow indicator for this go
+   * - indicatorColor: 0xRRGGBB (Phaser color int), used for line + arrow
+   */
+  goToTile(
+    goalX,
+    goalY,
+    {
+      allowBlocked = false,
+      showIndicator = true,
+      indicatorColor = 0x33ff77
+    } = {}
+  ) {
+    // Apply per-goal indicator settings
+    this.showPathIndicator = !!showIndicator;
+    this.pathIndicatorColor = indicatorColor;
+
+    // If indicator is disabled, hide any existing indicator now
+    if (!this.showPathIndicator) {
+      for (const g of this.pathSegments) g.setVisible(false);
+      if (this.arrowG) this.arrowG.setVisible(false);
+    }
+
     if (!allowBlocked && this.GRID.isBlocked(goalX, goalY)) {
       this.events.emit('stuck', { reason: 'goal_blocked', goalX, goalY });
       return false;
@@ -226,10 +262,12 @@ export class NPC {
       else if (this.targetNode.y < this.tileY) { this.facing = 'up'; this.sprite.anims.play('npc_walk_up', true); }
     }
 
-    if (this.targetNode) {
+    // Draw indicator only if enabled for this goal
+    if (this.showPathIndicator && this.targetNode) {
       const nextWorld = this.GRID.tileToWorld(this.targetNode.x, this.targetNode.y);
       this.drawPathIndicator(nextWorld);
     } else {
+      // ensure hidden when disabled
       this.drawPathIndicator(null);
     }
 
@@ -240,7 +278,16 @@ export class NPC {
   // Path indicator (scribble + trimming)
   // ---------------------------
   drawPathIndicator(nextWorld) {
-    const color = 0x33ff77;
+    // If indicator is disabled, force hide and exit
+    if (!this.showPathIndicator) {
+      for (const g of this.pathSegments) g.setVisible(false);
+      if (this.arrowG) this.arrowG.setVisible(false);
+      return;
+    }
+
+    // Per-goal (or default) color
+    const color = this.pathIndicatorColor ?? 0x33ff77;
+
     const yOffset = this.GRID.tileH * 0.5;
 
     // Ensure fields exist

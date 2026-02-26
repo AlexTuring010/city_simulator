@@ -33,7 +33,7 @@ export class RandomWanderController {
       const goalY = Phaser.Math.Between(1, this.GRID.height);
 
       if (this.GRID.isBlocked(goalX, goalY)) continue;
-      if (this.npc.goToTile(goalX, goalY)) return;
+      if (this.npc.goToTile(goalX, goalY, { showIndicator: true, indicatorColor: 0xdc143c })) return;
     }
 
     // fallback: just wait and try later
