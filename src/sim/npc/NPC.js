@@ -11,8 +11,14 @@ import {
 import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js';
 
 export class NPC {
-  constructor(scene, GRID, startTileX, startTileY) {
+  constructor(scene, GRID, startTileX, startTileY, { type = 'type1' } = {}) {
     this.id = (NPC._idCounter = (NPC._idCounter || 0) + 1);
+
+    // simulation identity
+    this.type = type;               // <-- remember what type this NPC is
+    this.spriteKey = NPC.getSpriteKeyForType(type); // <-- resolve to spritesheet key
+
+    this.animSuffix = (this.type === 'type2') ? '2' : '';
 
     this.scene = scene;
     this.GRID = GRID;
@@ -81,6 +87,15 @@ export class NPC {
 
     this.setIdleFacing();
     this._syncDepthAndShadow();
+
+  }
+
+  _animKey(dir) {
+    return `npc_walk_${dir}${this.animSuffix}`;
+  }
+
+  static getSpriteKeyForType(type) {
+    return type === 'type2' ? 'npc_sprite2' : 'npc_sprite';
   }
 
   // ---------------------------
@@ -267,11 +282,13 @@ export class NPC {
   setIdleFacing() {
     if (!this.sprite) return;
 
-    const key =
-      this.facing === 'right' ? 'npc_walk_right' :
-      this.facing === 'left'  ? 'npc_walk_left'  :
-      this.facing === 'up'    ? 'npc_walk_up'    :
-                                'npc_walk_down';
+    const dir =
+      this.facing === 'right' ? 'right' :
+      this.facing === 'left'  ? 'left'  :
+      this.facing === 'up'    ? 'up'    :
+                                'down';
+
+    const key = this._animKey(dir);
 
     this.sprite.anims.play(key, true);
     this.sprite.anims.pause();
@@ -346,16 +363,16 @@ export class NPC {
       // update facing (tile-based intent)
       if (this.targetNode.x > this.tileX) {
         this.facing = 'right';
-        this.sprite.anims.play('npc_walk_right', true);
+        this.sprite.anims.play(this._animKey('right'), true);
       } else if (this.targetNode.x < this.tileX) {
         this.facing = 'left';
-        this.sprite.anims.play('npc_walk_left', true);
+        this.sprite.anims.play(this._animKey('left'), true);
       } else if (this.targetNode.y > this.tileY) {
         this.facing = 'down';
-        this.sprite.anims.play('npc_walk_down', true);
+        this.sprite.anims.play(this._animKey('down'), true);
       } else if (this.targetNode.y < this.tileY) {
         this.facing = 'up';
-        this.sprite.anims.play('npc_walk_up', true);
+        this.sprite.anims.play(this._animKey('up'), true);
       }
     }
 

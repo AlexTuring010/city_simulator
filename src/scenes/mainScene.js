@@ -45,6 +45,10 @@ export const mainScene = {
       frameWidth: 32,
       frameHeight: 32
     });
+    this.load.spritesheet('npc_sprite2', 'assets/person_tiles2.png', {
+      frameWidth: 32,
+      frameHeight: 32
+    });
   },
 
   create() {
@@ -129,6 +133,11 @@ export const mainScene = {
     this.anims.create({ key: 'npc_walk_up',    frames: this.anims.generateFrameNumbers('npc_sprite', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
     this.anims.create({ key: 'npc_walk_left',  frames: this.anims.generateFrameNumbers('npc_sprite', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
 
+    this.anims.create({ key: 'npc_walk_down2',  frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_right2', frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_up2',    frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_left2',  frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
+
     // Spawn NPCs
     const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
     this.npcs = {};
@@ -139,10 +148,12 @@ export const mainScene = {
       for (let i = 0; i < maxNPCs; i++) {
         const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
 
-        // Convert spawner object position -> base-1 tile coords (shared rules)
         const t = this.GRID.objectToTile(spawner.x, spawner.y);
 
-        const npc = new NPC(this, this.GRID, t.x, t.y);
+        // 50 / 50 split
+        const type = Math.random() < 0.5 ? 'type2' : 'type1';
+
+        const npc = new NPC(this, this.GRID, t.x, t.y, { type });
         npc.controller = new RandomWanderController(this, npc, this.GRID);
 
         this.npcs[npc.id] = npc;
