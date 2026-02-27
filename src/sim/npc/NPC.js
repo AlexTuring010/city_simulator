@@ -183,9 +183,15 @@ export class NPC {
    * - indicatorColor: 0xRRGGBB (Phaser color int), used for line + arrow
    */
   goToTile(
-    goalX,
-    goalY,
-    { allowBlocked = false, showIndicator = true, indicatorColor = 0x33ff77 } = {}
+  goalX,
+  goalY,
+  {
+    allowBlockedStart = true,
+    allowBlockedGoal = false,
+    allowBlockedPath = false,
+    showIndicator = true,
+    indicatorColor = 0x33ff77
+  } = {}
   ) {
     // Apply per-goal indicator settings
     this.showPathIndicator = !!showIndicator;
@@ -194,7 +200,7 @@ export class NPC {
     // If indicator is disabled, hide any existing indicator now
     if (!this.showPathIndicator) this._hideIndicator();
 
-    if (!allowBlocked && this.GRID.isBlocked(goalX, goalY)) {
+    if (!allowBlockedGoal && this.GRID.isBlocked(goalX, goalY)) {
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.GOAL_BLOCKED,
         goalX,
@@ -203,7 +209,11 @@ export class NPC {
       return false;
     }
 
-    const path = findPath(this.GRID, this.tileX, this.tileY, goalX, goalY);
+    const path = findPath(this.GRID, this.tileX, this.tileY, goalX, goalY, {
+      allowBlockedStart,
+      allowBlockedGoal,
+      allowBlockedPath
+    });
     if (!path || path.length <= 1) {
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.NO_PATH,

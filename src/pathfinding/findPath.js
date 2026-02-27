@@ -1,3 +1,5 @@
+// src/pathfinding/findPath.js
+
 /**
  * Lightweight A* Pathfinding (BASE-1)
  * ----------------------------------
@@ -5,7 +7,16 @@
  * - GRID.inBounds(x,y)
  * - GRID.isBlocked(x,y)
  */
-export function findPath(GRID, startX, startY, endX, endY) {
+export function findPath(GRID, startX, startY, endX, endY, opts = {}) {
+  const {
+    allowBlockedStart = true,  // start being blocked is usually fine (you can still step out)
+    allowBlockedGoal = false,  // IMPORTANT for “sit on table” / “stand in doorway”
+    allowBlockedPath = false   // set true only if you really want to walk through walls
+  } = opts;                    // useful for walking in building doorways, or table tiles to have npc play eat animation
+
+  // If you want to *disallow* starting inside a blocked tile:
+  if (!allowBlockedStart && GRID.isBlocked(startX, startY)) return null;
+
   const openSet = [{ x: startX, y: startY, g: 0, f: 0, parent: null }];
   const closedSet = new Set();
 
@@ -33,8 +44,17 @@ export function findPath(GRID, startX, startY, endX, endY) {
 
     for (const n of neighbors) {
       if (!GRID.inBounds(n.x, n.y)) continue;
-      if (GRID.isBlocked(n.x, n.y)) continue;
       if (closedSet.has(key(n.x, n.y))) continue;
+
+      const isGoal = (n.x === endX && n.y === endY);
+
+      // Block rule:
+      // - normally blocked tiles are forbidden
+      // - but allow the GOAL tile if allowBlockedGoal
+      // - or allow all blocked tiles if allowBlockedPath
+      if (GRID.isBlocked(n.x, n.y)) {
+        if (!allowBlockedPath && !(allowBlockedGoal && isGoal)) continue;
+      }
 
       const gScore = current.g + 1;
       const existing = openSet.find(node => node.x === n.x && node.y === n.y);

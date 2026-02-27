@@ -1,3 +1,5 @@
+// src/scenes/mainScene.js
+
 /**
  * Main Scene
  * ----------
@@ -8,7 +10,7 @@
  * - collision queries (via GRID.isBlocked when needed)
  */
 import { NPC } from '../sim/npc/index.js';
-import { makeGridIso } from '../gridIso.js';
+import { makeGridIso } from '../grid/gridIso.js';
 import { RandomWanderController } from '../sim/controllers/RandomWanderController.js';
 
 export const mainScene = {
