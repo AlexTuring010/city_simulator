@@ -1,8 +1,4 @@
-/**
- * Controllers
- * -----------
- * Uses NPC + GRID as black boxes.
- */
+import { NPC_EVENTS } from '../npc/NPCEvents.js';
 
 export class RandomWanderController {
   constructor(scene, npc, GRID, { minWaitMs = 1000, maxWaitMs = 4000 } = {}) {
@@ -12,11 +8,9 @@ export class RandomWanderController {
     this.minWaitMs = minWaitMs;
     this.maxWaitMs = maxWaitMs;
 
-    // When npc arrives or fails, schedule next wander
-    npc.on('arrived', () => this.scheduleNext());
-    npc.on('stuck', () => this.scheduleNext());
+    npc.on(NPC_EVENTS.ARRIVED, () => this.scheduleNext());
+    npc.on(NPC_EVENTS.STUCK, () => this.scheduleNext());
 
-    // Kick off
     this.scheduleNext();
   }
 
@@ -33,10 +27,13 @@ export class RandomWanderController {
       const goalY = Phaser.Math.Between(1, this.GRID.height);
 
       if (this.GRID.isBlocked(goalX, goalY)) continue;
-      if (this.npc.goToTile(goalX, goalY, { showIndicator: true, indicatorColor: 0x00FFFF })) return;
+
+      if (this.npc.goToTile(goalX, goalY, {
+        showIndicator: true,
+        indicatorColor: 0x00FFFF
+      })) return;
     }
 
-    // fallback: just wait and try later
     this.scheduleNext();
   }
 }

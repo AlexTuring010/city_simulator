@@ -7,9 +7,9 @@
  * - base-1 tile -> world pixels
  * - collision queries (via GRID.isBlocked when needed)
  */
+import { NPC } from '../sim/npc/index.js';
 import { makeGridIso } from '../gridIso.js';
-import { NPC } from '../npc.js';
-import { RandomWanderController } from '../controllers.js';
+import { RandomWanderController } from '../sim/controllers/RandomWanderController.js';
 
 export const mainScene = {
   key: 'MainScene',

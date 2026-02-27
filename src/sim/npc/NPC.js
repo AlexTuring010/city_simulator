@@ -1,106 +1,29 @@
-/**
- * NPC Class (Simulation-first, Rendering-optional)
- * ------------------------------------------------
- * Goal:
- * - Keep this class usable in both "rendered" mode (Phaser sprites/graphics)
- *   and future "headless" mode (no Phaser objects, fast simulation).
- *
- * IMPORTANT DESIGN RULES (so headless is easy later):
- *
- * 1) Do NOT depend on Phaser display objects outside this file.
- *    - Other systems should NOT read/write npc.sprite, npc.arrowG, npc.pathSegments.
- *    - Treat sprite/graphics as an internal implementation detail of NPC.
- *
- * 2) Prefer simulation state as the source of truth:
- *    - Use npc.tileX / npc.tileY (and ideally npc.x / npc.y if you add them later)
- *      as the authoritative position.
- *    - Avoid using npc.sprite.x / npc.sprite.y in external code.
- *
- * 3) Interact via public API + events, not visuals:
- *    - Use npc.goToTile(...) / npc.stop() / npc.wait(...) / npc.isBusy()
- *    - Subscribe to npc events: 'arrived', 'stuck', 'stateChanged', etc.
- *
- * 4) Rendering features are optional/debug-only:
- *    - Path indicator (scribble/arrow) must remain optional via showIndicator.
- *    - In headless mode we will skip drawPathIndicator() entirely.
- *
- * 5) Avoid tying game logic to per-frame movement or draw rate:
- *    - External systems should not assume the NPC advances one node per frame.
- *    - In headless mode movement may be replaced by ETA scheduling
- *      (compute travel time and emit 'arrived' later without step-by-step walking).
- *
- * 6) Pathfinding usage should remain inside NPC (or behind an abstraction):
- *    - External code should not call findPath() directly for NPC travel.
- *    - In headless mode we may replace tile A* with Manhattan ETA + small obstacle penalty,
- *      or coarse graph routing + caching, without changing external systems.
- *
- * Allowed external reads:
- * - npc.tileX, npc.tileY, npc.state, npc.facing (optional), npc._goal (prefer not)
- *
- * Avoid external reads:
- * - npc.sprite.*, npc.pathCache/pathSegments/arrowG, npc.path (internal / render-specific)
- *
- * If you later add: constructor(..., { render = true } = {})
- * - When render=false:
- *   - Do not create sprite/graphics, skip drawPathIndicator, and drive movement by ETA.
- */
-
-// I have not yet implemented the renderless mode, but I want to keep the code organized so that it's easy to remove Phaser dependencies later. 
-// Hence, all Phaser-related code (sprite creation, graphics drawing) is contained within this NPC class, and external systems should only interact 
-// with it via the public API and events.
-
-// This may become essential later if we decide that we wanna run the simulator for 500k people in a city the size of Athens for
-// example to calculate useful metrics. In that case, we can run the simulation in a headless mode without rendering, and only use
-// the NPC class for its pathfinding and movement logic, while skipping all the Phaser-related code. 
-
-import { findPath } from './pathfinding.js';
+// NPC.js
+import { findPath } from '../../strategy/navigation/AStarNavigation.js';
 import {
   ARROW_ALPHA,
   buildScribblePoints,
   catmullRomInterpolate,
   decimatePoints,
   strokeMarkerFast
-} from './scribble.js';
+} from '../../render/indicators/scribble.js';
+
+import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js';
 
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY) {
     this.id = (NPC._idCounter = (NPC._idCounter || 0) + 1);
-    this.pathCacheIdx = 0;
-    this.pathSeed = (Math.random() * 1e9) | 0;
+
     this.scene = scene;
     this.GRID = GRID;
 
     // events API
     this.events = new Phaser.Events.EventEmitter();
 
+    // simulation state
     this.facing = 'down';
     this.tileX = startTileX;
     this.tileY = startTileY;
-
-    const pos = GRID.tileToWorld(this.tileX, this.tileY);
-
-    this.sprite = scene.add.sprite(pos.x, pos.y, 'npc_sprite', 15);
-    this.sprite.setOrigin(0.5, 1);
-
-    // --- Soft ground shadow (very cheap) ---
-    this.shadow = scene.add.ellipse(
-      pos.x,
-      pos.y-8,                // tiny offset downward if needed
-      GRID.tileW * 0.4,   // width
-      GRID.tileH * 0.4,  // height (squashed)
-      0x000000,
-      0.25                // alpha
-    );
-    this.shadow.setOrigin(0.5, 0.5);
-    this.shadow.setDepth(this.sprite.y - 0.1);
-
-    // path indicator graphics
-    this.pathSegments = [];
-    this.arrowG = null;
-
-    // path state
-    this.pathDirty = true;
-    this.pathCache = null;
 
     // movement state
     this.state = 'IDLE'; // 'IDLE' | 'WAITING' | 'MOVING'
@@ -111,15 +34,40 @@ export class NPC {
     this._waitTimer = null;
     this._goal = null; // {x,y} of the final destination (optional)
 
-    // -----------------------------------------
-    // Path indicator options (per-goal configurable)
-    // -----------------------------------------
-    this.showPathIndicator = true;      // can be toggled per goToTile()
-    this.pathIndicatorColor = 0x33ff77; // can be set per goToTile()
+    // path indicator options (per-goal configurable)
+    this.showPathIndicator = true;
+    this.pathIndicatorColor = 0x33ff77;
 
-    // -----------------------------------------
-    // Indicator redraw state (avoid clear+stroke unless needed)
-    // -----------------------------------------
+    // scribble caching
+    this.pathDirty = true;
+    this.pathCache = null;
+    this.pathCacheIdx = 0;
+    this.pathSeed = (Math.random() * 1e9) | 0;
+
+    // render objects (internal)
+    const pos = GRID.tileToWorld(this.tileX, this.tileY);
+
+    this.sprite = scene.add.sprite(pos.x, pos.y, 'npc_sprite', 15);
+    this.sprite.setOrigin(0.5, 1);
+
+    // --- Soft ground shadow (very cheap) ---
+    // (Ellipse is a lightweight Shape object; no redraw unless style changes)
+    this.shadow = scene.add.ellipse(
+      pos.x,
+      pos.y - 8,           // slight "feet" offset
+      GRID.tileW * 0.4,    // width
+      GRID.tileH * 0.4,    // height
+      0x000000,
+      0.25                // alpha
+    );
+    this.shadow.setOrigin(0.5, 0.5);
+    this.shadow.setDepth(this.sprite.y - 1);
+
+    // path indicator graphics
+    this.pathSegments = [];
+    this.arrowG = null;
+
+    // indicator redraw state (avoid clear+stroke unless needed)
     this._indicatorState = {
       lastIdx: -1,
       lastStartX: 0,
@@ -129,7 +77,10 @@ export class NPC {
       lastArrowY: 0
     };
 
+    this.lastPathDraw = 0;
+
     this.setIdleFacing();
+    this._syncDepthAndShadow();
   }
 
   // ---------------------------
@@ -139,15 +90,45 @@ export class NPC {
     this.events.on(eventName, fn, context);
     return this;
   }
+
   off(eventName, fn, context) {
     this.events.off(eventName, fn, context);
     return this;
   }
 
+  // Optional but useful for cleanup/despawn
+  destroy() {
+    if (this._waitTimer) {
+      this._waitTimer.remove(false);
+      this._waitTimer = null;
+    }
+
+    // destroy indicator graphics
+    for (const g of this.pathSegments) g.destroy();
+    this.pathSegments.length = 0;
+
+    if (this.arrowG) {
+      this.arrowG.destroy();
+      this.arrowG = null;
+    }
+
+    // destroy shadow + sprite
+    if (this.shadow) {
+      this.shadow.destroy();
+      this.shadow = null;
+    }
+    if (this.sprite) {
+      this.sprite.destroy();
+      this.sprite = null;
+    }
+
+    this.events.removeAllListeners();
+  }
+
   // ---------------------------
   // External API (controls)
   // ---------------------------
-  stop(reason = 'stopped') {
+  stop(reason = NPC_STOP_REASONS.STOPPED) {
     if (this._waitTimer) {
       this._waitTimer.remove(false);
       this._waitTimer = null;
@@ -168,13 +149,12 @@ export class NPC {
       this._indicatorState.lastCacheRef = null;
     }
 
-    // When stopping, also hide indicator immediately
-    for (const g of this.pathSegments) g.setVisible(false);
-    if (this.arrowG) this.arrowG.setVisible(false);
+    // hide indicator immediately
+    this._hideIndicator();
 
     this.setIdleFacing();
-    this.events.emit('stateChanged', this.state);
-    this.events.emit('stopped', { reason });
+    this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+    this.events.emit(NPC_EVENTS.STOPPED, { reason });
   }
 
   wait(ms = 1000) {
@@ -182,13 +162,13 @@ export class NPC {
 
     this.state = 'WAITING';
     this.setIdleFacing();
-    this.events.emit('stateChanged', this.state);
+    this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
 
     this._waitTimer = this.scene.time.delayedCall(ms, () => {
       this._waitTimer = null;
       this.state = 'IDLE';
-      this.events.emit('stateChanged', this.state);
-      this.events.emit('waitDone');
+      this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+      this.events.emit(NPC_EVENTS.WAIT_DONE);
     });
 
     return true;
@@ -205,30 +185,31 @@ export class NPC {
   goToTile(
     goalX,
     goalY,
-    {
-      allowBlocked = false,
-      showIndicator = true,
-      indicatorColor = 0x33ff77
-    } = {}
+    { allowBlocked = false, showIndicator = true, indicatorColor = 0x33ff77 } = {}
   ) {
     // Apply per-goal indicator settings
     this.showPathIndicator = !!showIndicator;
     this.pathIndicatorColor = indicatorColor;
 
     // If indicator is disabled, hide any existing indicator now
-    if (!this.showPathIndicator) {
-      for (const g of this.pathSegments) g.setVisible(false);
-      if (this.arrowG) this.arrowG.setVisible(false);
-    }
+    if (!this.showPathIndicator) this._hideIndicator();
 
     if (!allowBlocked && this.GRID.isBlocked(goalX, goalY)) {
-      this.events.emit('stuck', { reason: 'goal_blocked', goalX, goalY });
+      this.events.emit(NPC_EVENTS.STUCK, {
+        reason: NPC_STUCK_REASONS.GOAL_BLOCKED,
+        goalX,
+        goalY
+      });
       return false;
     }
 
     const path = findPath(this.GRID, this.tileX, this.tileY, goalX, goalY);
     if (!path || path.length <= 1) {
-      this.events.emit('stuck', { reason: 'no_path', goalX, goalY });
+      this.events.emit(NPC_EVENTS.STUCK, {
+        reason: NPC_STUCK_REASONS.NO_PATH,
+        goalX,
+        goalY
+      });
       return false;
     }
 
@@ -249,6 +230,7 @@ export class NPC {
     this.targetNode = this.path.shift();
 
     this.state = 'MOVING';
+
     this.pathCache = null;
     this.pathCacheIdx = 0;
     this.pathDirty = true;
@@ -259,8 +241,9 @@ export class NPC {
       this._indicatorState.lastCacheRef = null;
     }
 
-    this.events.emit('stateChanged', this.state);
-    this.events.emit('goalSet', { goalX, goalY });
+    this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+    this.events.emit(NPC_EVENTS.GOAL_SET, { goalX, goalY });
+
     return true;
   }
 
@@ -272,6 +255,8 @@ export class NPC {
   // Animation helper
   // ---------------------------
   setIdleFacing() {
+    if (!this.sprite) return;
+
     const key =
       this.facing === 'right' ? 'npc_walk_right' :
       this.facing === 'left'  ? 'npc_walk_left'  :
@@ -287,10 +272,12 @@ export class NPC {
   // Per-frame update
   // ---------------------------
   update() {
+    if (!this.sprite) return;
+
+    // Not moving -> hide indicator + keep depth correct
     if (this.state !== 'MOVING' || !this.targetNode) {
-      for (const g of this.pathSegments) g.setVisible(false);
-      if (this.arrowG) this.arrowG.setVisible(false);
-      this.sprite.setDepth(this.sprite.y);
+      this._hideIndicator();
+      this._syncDepthAndShadow();
       return;
     }
 
@@ -304,6 +291,7 @@ export class NPC {
       // snap to target node
       this.sprite.x = targetWorld.x;
       this.sprite.y = targetWorld.y;
+
       this.tileX = this.targetNode.x;
       this.tileY = this.targetNode.y;
 
@@ -312,6 +300,7 @@ export class NPC {
       } else {
         // arrived at final tile
         const arrivedGoal = this._goal;
+
         this.targetNode = null;
         this._goal = null;
 
@@ -326,8 +315,9 @@ export class NPC {
 
         this.state = 'IDLE';
         this.setIdleFacing();
-        this.events.emit('stateChanged', this.state);
-        this.events.emit('arrived', {
+
+        this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+        this.events.emit(NPC_EVENTS.ARRIVED, {
           tileX: this.tileX,
           tileY: this.tileY,
           goal: arrivedGoal
@@ -344,10 +334,19 @@ export class NPC {
       this.sprite.y += Math.sin(angle) * this.speed;
 
       // update facing (tile-based intent)
-      if (this.targetNode.x > this.tileX) { this.facing = 'right'; this.sprite.anims.play('npc_walk_right', true); }
-      else if (this.targetNode.x < this.tileX) { this.facing = 'left'; this.sprite.anims.play('npc_walk_left', true); }
-      else if (this.targetNode.y > this.tileY) { this.facing = 'down'; this.sprite.anims.play('npc_walk_down', true); }
-      else if (this.targetNode.y < this.tileY) { this.facing = 'up'; this.sprite.anims.play('npc_walk_up', true); }
+      if (this.targetNode.x > this.tileX) {
+        this.facing = 'right';
+        this.sprite.anims.play('npc_walk_right', true);
+      } else if (this.targetNode.x < this.tileX) {
+        this.facing = 'left';
+        this.sprite.anims.play('npc_walk_left', true);
+      } else if (this.targetNode.y > this.tileY) {
+        this.facing = 'down';
+        this.sprite.anims.play('npc_walk_down', true);
+      } else if (this.targetNode.y < this.tileY) {
+        this.facing = 'up';
+        this.sprite.anims.play('npc_walk_up', true);
+      }
     }
 
     // Draw indicator only if enabled for this goal
@@ -355,18 +354,31 @@ export class NPC {
       const nextWorld = this.GRID.tileToWorld(this.targetNode.x, this.targetNode.y);
       this.drawPathIndicator(nextWorld);
     } else {
-      // ensure hidden when disabled
       this.drawPathIndicator(null);
     }
 
-    this.sprite.setDepth(this.sprite.y);
+    this._syncDepthAndShadow();
+  }
 
-    // Keep shadow at feet
-    this.shadow.x = this.sprite.x;
-    this.shadow.y = this.sprite.y - 8; // tiny offset upward if needed
+  _syncDepthAndShadow() {
+        if (!this.sprite) return;
 
-    // Always under sprite
-    this.shadow.setDepth(this.sprite.y - 0.1);
+        // Always depth sprite first
+        this.sprite.setDepth(this.sprite.y);
+
+        if (!this.shadow) return;
+
+        // Follow sprite
+        this.shadow.x = this.sprite.x;
+        this.shadow.y = this.sprite.y - 8;
+
+        // Always under sprite
+        this.shadow.setDepth(this.sprite.y - 1);
+  }
+
+  _hideIndicator() {
+    for (const g of this.pathSegments) g.setVisible(false);
+    if (this.arrowG) this.arrowG.setVisible(false);
   }
 
   // ---------------------------
@@ -375,39 +387,19 @@ export class NPC {
   drawPathIndicator(nextWorld) {
     // If indicator is disabled, force hide and exit
     if (!this.showPathIndicator) {
-      for (const g of this.pathSegments) g.setVisible(false);
-      if (this.arrowG) this.arrowG.setVisible(false);
+      this._hideIndicator();
       return;
-    }
-
-    // Per-goal (or default) color
-    const color = this.pathIndicatorColor ?? 0x33ff77;
-
-    const yOffset = this.GRID.tileH * 0.5;
-
-    // Ensure fields exist
-    if (this.lastPathDraw === undefined) this.lastPathDraw = 0;
-    if (this.pathSeed === undefined) this.pathSeed = ((Math.random() * 1e9) | 0);
-    if (this.pathCacheIdx === undefined) this.pathCacheIdx = 0;
-    if (!this._indicatorState) {
-      this._indicatorState = {
-        lastIdx: -1,
-        lastStartX: 0,
-        lastStartY: 0,
-        lastColor: null,
-        lastCacheRef: null,
-        lastArrowY: 0
-      };
     }
 
     // If no target, hide and exit
     if (!nextWorld) {
-      for (const g of this.pathSegments) g.setVisible(false);
-      if (this.arrowG) this.arrowG.setVisible(false);
+      this._hideIndicator();
       return;
     }
 
-    // Start point anchored to *current* sprite position
+    const color = this.pathIndicatorColor ?? 0x33ff77;
+    const yOffset = this.GRID.tileH * 0.5;
+
     const startPt = { x: this.sprite.x, y: this.sprite.y - yOffset };
 
     // Throttle drawing (keep visibility correct regardless)
@@ -475,8 +467,6 @@ export class NPC {
 
     // 2.5) Decide if we should redraw this frame
     const st = this._indicatorState;
-
-    // thresholds (tune)
     const START_STEP_PX = 6; // redraw only if start moved enough
     const IDX_STEP = 2;      // redraw only if trimming advanced enough
 
@@ -491,8 +481,6 @@ export class NPC {
     const needRedraw = canRedraw && (cacheChanged || colorChanged || idxMoved || startMoved);
 
     if (!needRedraw) {
-      // Do NOT clear+stroke. Keep previous graphics as-is.
-      // (optional) keep arrow depth roughly correct without redrawing:
       if (this.arrowG) this.arrowG.setDepth((st.lastArrowY || startPt.y) + 1);
       return;
     }
@@ -507,7 +495,7 @@ export class NPC {
     // 3) Draw chunked segments
     for (const g of this.pathSegments) g.setVisible(false);
 
-    const MAX_LEN = 16; // already improved from 1
+    const MAX_LEN = 16;
     let segIndex = 0;
     let chunk = [pts[0]];
     let accLen = 0;
