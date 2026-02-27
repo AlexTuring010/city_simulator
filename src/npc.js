@@ -82,6 +82,18 @@ export class NPC {
     this.sprite = scene.add.sprite(pos.x, pos.y, 'npc_sprite', 15);
     this.sprite.setOrigin(0.5, 1);
 
+    // --- Soft ground shadow (very cheap) ---
+    this.shadow = scene.add.ellipse(
+      pos.x,
+      pos.y-8,                // tiny offset downward if needed
+      GRID.tileW * 0.4,   // width
+      GRID.tileH * 0.4,  // height (squashed)
+      0x000000,
+      0.25                // alpha
+    );
+    this.shadow.setOrigin(0.5, 0.5);
+    this.shadow.setDepth(this.sprite.y - 0.1);
+
     // path indicator graphics
     this.pathSegments = [];
     this.arrowG = null;
@@ -348,6 +360,13 @@ export class NPC {
     }
 
     this.sprite.setDepth(this.sprite.y);
+
+    // Keep shadow at feet
+    this.shadow.x = this.sprite.x;
+    this.shadow.y = this.sprite.y - 8; // tiny offset upward if needed
+
+    // Always under sprite
+    this.shadow.setDepth(this.sprite.y - 0.1);
   }
 
   // ---------------------------
