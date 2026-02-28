@@ -415,24 +415,29 @@ export class Store {
     }
 
     return new Promise((resolve, reject) => {
+      const DOOR_OPEN_MS = 150;   // tweak
+      const DOOR_CLOSE_MS = 150;
+
       const onArrived = () => {
         cleanup();
 
         this.openDoor();
 
-        npc.putInside?.({ containerId: `store:${this.storeId}`, reason: 'ENTER_STORE' });
+        this.scene.time.delayedCall(DOOR_OPEN_MS, () => {
+          npc.putInside?.({ containerId: `store:${this.storeId}`, reason: 'ENTER_STORE' });
 
-        // consume reservation -> indoors
-        this.reserved.delete(npc);
-        this.indoors.add(npc);
+          // consume reservation -> indoors
+          this.reserved.delete(npc);
+          this.indoors.add(npc);
 
-        this.closeDoor();
+          this.events.emit(STORE_EVENTS.ENTERED, { store: this, npc });
 
-        this.events.emit(STORE_EVENTS.ENTERED, { store: this, npc });
-
-        // entering may allow more invites
-        this._fillInvites();
-        resolve(true);
+          this.scene.time.delayedCall(DOOR_CLOSE_MS, () => {
+            this.closeDoor();
+            this._fillInvites();
+            resolve(true);
+          });
+        });
       };
 
       const onStuck = (data) => {
@@ -534,24 +539,39 @@ export class Store {
     }
   }
 
-  releaseNpcFromIndoors(npc) {
+  releaseNpcFromIndoors(npc, { doorMs = 150 } = {}) {
     if (!this.indoors.has(npc)) return false;
 
+    // Remove first so capacity frees immediately
     this.indoors.delete(npc);
 
     const entry = this.entryTile;
 
-    // If your container system needs a hard "pop out", keep this:
-    npc.takeOutToTile?.(entry.x, entry.y, { containerId: `store:${this.storeId}` });
+    // Visually open the door long enough to be rendered
+    this.openDoor();
 
-    // NEW: then walk to nearest free tile so they don't pile up at the door
-    this._goToNearestFreeTile(npc, entry.x, entry.y, {
-      findOpts: { maxRadius: 8 }
+    // Give the renderer a moment before popping them out
+    this.scene.time.delayedCall(doorMs, () => {
+      // Pop out of container to the door tile
+      npc.takeOutToTile?.(entry.x, entry.y, { containerId: `store:${this.storeId}` });
+
+      // Walk away so they don't stack on the entry
+      this._goToNearestFreeTile(npc, entry.x, entry.y, {
+        findOpts: { maxRadius: 8 },
+        pathOpts: { allowWeakCollision: true, allowBlockedStart: true }
+      });
+
+      this.events.emit(STORE_EVENTS.LEFT, { store: this, npc });
+
+      // Close door after a short moment so the open frame is visible
+      this.scene.time.delayedCall(doorMs, () => {
+        this.closeDoor();
+
+        // Leaving may allow more invites
+        this._onSpotFreed();
+      });
     });
 
-    this.events.emit(STORE_EVENTS.LEFT, { store: this, npc });
-
-    this._onSpotFreed();
     return true;
   }
 

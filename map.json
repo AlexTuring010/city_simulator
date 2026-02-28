@@ -1229,65 +1229,6 @@
                  "width":32,
                  "x":448,
                  "y":192
-                }, 
-                {
-                 "gid":44,
-                 "height":138,
-                 "id":353,
-                 "name":"",
-                 "properties":[
-                        {
-                         "name":"DepthOffset",
-                         "type":"int",
-                         "value":32
-                        }, 
-                        {
-                         "name":"IsVisible",
-                         "type":"bool",
-                         "value":false
-                        }],
-                 "rotation":0,
-                 "type":"",
-                 "visible":true,
-                 "width":160,
-                 "x":256,
-                 "y":176
-                }, 
-                {
-                 "gid":45,
-                 "height":138,
-                 "id":390,
-                 "name":"",
-                 "properties":[
-                        {
-                         "name":"IsVisible",
-                         "type":"bool",
-                         "value":false
-                        }],
-                 "rotation":0,
-                 "type":"",
-                 "visible":true,
-                 "width":160,
-                 "x":432,
-                 "y":96
-                }, 
-                {
-                 "gid":46,
-                 "height":138,
-                 "id":447,
-                 "name":"",
-                 "properties":[
-                        {
-                         "name":"IsVisible",
-                         "type":"bool",
-                         "value":false
-                        }],
-                 "rotation":0,
-                 "type":"",
-                 "visible":true,
-                 "width":160,
-                 "x":80,
-                 "y":224
                 }],
          "opacity":1,
          "type":"objectgroup",

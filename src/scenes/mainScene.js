@@ -109,8 +109,10 @@ export const mainScene = {
             p => p.name.toLowerCase() === 'isvisible'
           );
           if (prop) isVisible = prop.value !== false;
+          console.log('Found IsVisible property in array properties');
         } else if (object.properties.IsVisible !== undefined) {
           isVisible = object.properties.IsVisible !== false;
+          console.log('Found IsVisible property in non-array properties; consider using array format for consistency');
         }
       }
 
@@ -241,7 +243,7 @@ export const mainScene = {
     this.npcs = {};
 
     if (spawnerObjects.length > 0) {
-      const maxNPCs = 100;
+      const maxNPCs = 200;
 
       // Factory keeps EatOutController independent
       const wanderFactory = (scene, npc, GRID) =>

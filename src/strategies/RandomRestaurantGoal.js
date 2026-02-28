@@ -70,8 +70,6 @@ export class RandomRestaurantGoal {
         if (outsideGoal && (outsideGoal.x !== npc.tileX || outsideGoal.y !== npc.tileY)) {
           npc.goToTile(outsideGoal.x, outsideGoal.y, {
             allowBlockedPath: true,
-            showIndicator: true,
-            indicatorColor: 0x800080
           });
         }
 

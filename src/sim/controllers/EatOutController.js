@@ -339,8 +339,6 @@ export class EatOutController {
 
     if (free) {
       this.npc.goToTile?.(free.x, free.y, {
-        showIndicator: true,
-        indicatorColor: 0xFF0000
       });
     }
 

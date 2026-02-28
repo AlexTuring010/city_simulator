@@ -95,8 +95,6 @@ export class RandomWanderController {
       if (this.GRID.isBlocked(goalX, goalY)) continue;
 
       if (this.npc.goToTile(goalX, goalY, {
-        showIndicator: true,
-        indicatorColor: 0x00FFFF
       })) {
         return;
       }
