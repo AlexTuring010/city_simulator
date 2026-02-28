@@ -129,6 +129,9 @@ export class NPC {
       lastArrowY: 0
     };
 
+    this.drawOffset = { x: 0, y: 0 };
+    this.depthOffset = 0;
+
     this.setIdleFacing();
   }
 
@@ -350,23 +353,17 @@ export class NPC {
       else if (this.targetNode.y < this.tileY) { this.facing = 'up'; this.sprite.anims.play('npc_walk_up', true); }
     }
 
-    // Draw indicator only if enabled for this goal
-    if (this.showPathIndicator && this.targetNode) {
-      const nextWorld = this.GRID.tileToWorld(this.targetNode.x, this.targetNode.y);
-      this.drawPathIndicator(nextWorld);
-    } else {
-      // ensure hidden when disabled
-      this.drawPathIndicator(null);
-    }
-
-    this.sprite.setDepth(this.sprite.y);
+    // Apply draw offset to sprite and shadow for rendering only
+    this.sprite.x += this.drawOffset.x;
+    this.sprite.y += this.drawOffset.y;
+    this.sprite.setDepth(this.sprite.y + this.depthOffset);
 
     // Keep shadow at feet
     this.shadow.x = this.sprite.x;
-    this.shadow.y = this.sprite.y - 8; // tiny offset upward if needed
+    this.shadow.y = this.sprite.y - 8;
 
     // Always under sprite
-    this.shadow.setDepth(this.sprite.y - 0.1);
+    this.shadow.setDepth(this.sprite.y - 0.1 + this.depthOffset);
   }
 
   // ---------------------------
@@ -579,5 +576,20 @@ export class NPC {
     st.lastColor = color;
     st.lastCacheRef = this.pathCache;
     st.lastArrowY = lastPt.y;
+  }
+
+  /**
+   * Set draw offset for NPC sprite/shadow only
+   */
+  setDrawOffset(x, y) {
+    this.drawOffset.x = x;
+    this.drawOffset.y = y;
+  }
+
+  /**
+   * Set depth offset for NPC sprite/shadow only
+   */
+  setDepthOffset(offset) {
+    this.depthOffset = offset;
   }
 }

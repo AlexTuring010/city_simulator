@@ -12,6 +12,19 @@ import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js'
 
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY, { type = 'type1' } = {}) {
+
+    this.controllerStack = [];
+
+    // "put inside" state
+    this.isInside = false;
+    this.insideData = null; // optional: { containerId, reason, ... }
+
+    // render offsets
+    this.posOffsetX = 0;     // world-space pixel offsets
+    this.posOffsetY = 0;
+    this.depthOffset = 0;    // added to depth sorting
+    this.shadowOffsetY = -8; // feet->shadow offset
+
     this.id = (NPC._idCounter = (NPC._idCounter || 0) + 1);
 
     // simulation identity
@@ -53,7 +66,7 @@ export class NPC {
     // render objects (internal)
     const pos = GRID.tileToWorld(this.tileX, this.tileY);
 
-    this.sprite = scene.add.sprite(pos.x, pos.y, 'npc_sprite', 15);
+    this.sprite = scene.add.sprite(pos.x + this.posOffsetX, pos.y + this.posOffsetY, this.spriteKey, 15);
     this.sprite.setOrigin(0.5, 1);
 
     // --- Soft ground shadow (very cheap) ---
@@ -96,6 +109,95 @@ export class NPC {
 
   static getSpriteKeyForType(type) {
     return type === 'type2' ? 'npc_sprite2' : 'npc_sprite';
+  }
+
+  setController(controller) {
+    // replace whole stack with one controller
+    this.clearControllers();
+    this.pushController(controller);
+  }
+
+  pushController(controller) {
+    const current = this.getController();
+    if (current?.onPause) current.onPause();
+
+    this.controllerStack.push(controller);
+    controller?.onStart?.();
+  }
+
+  popController() {
+    const current = this.controllerStack.pop();
+    current?.onStop?.();
+
+    const next = this.getController();
+    if (next?.onResume) next.onResume();
+
+    return current;
+  }
+
+  getController() {
+    return this.controllerStack[this.controllerStack.length - 1] ?? null;
+  }
+
+  clearControllers() {
+    while (this.controllerStack.length) {
+      const c = this.controllerStack.pop();
+      c?.onStop?.();
+    }
+  }
+
+  putInside({ containerId = null, reason = 'INSIDE' } = {}) {
+    // If already inside, do nothing
+    if (this.isInside) return;
+
+    // Stop movement + timers + indicators
+    this.stop(reason);
+
+    this.isInside = true;
+    this.insideData = { containerId, reason };
+
+    // Hide + disable rendering objects
+    if (this.sprite) {
+      this.sprite.setVisible(false);
+      this.sprite.setActive(false); // won't run preUpdate / etc
+    }
+    if (this.shadow) {
+      this.shadow.setVisible(false);
+      this.shadow.setActive(false);
+    }
+
+    this._hideIndicator();
+    for (const g of this.pathSegments) g.setActive(false);
+    if (this.arrowG) this.arrowG.setActive(false);
+  }
+
+  takeOutToTile(tileX, tileY, { containerId = null } = {}) {
+    // Update logical tile + world position
+    this.tileX = tileX;
+    this.tileY = tileY;
+
+    const pos = this.GRID.tileToWorld(tileX, tileY);
+
+    if (this.sprite) {
+      this.sprite.x = pos.x + this.posOffsetX;
+      this.sprite.y = pos.y + this.posOffsetY;
+      this.sprite.setVisible(true);
+      this.sprite.setActive(true);
+    }
+    if (this.shadow) {
+      this.shadow.setVisible(true);
+      this.shadow.setActive(true);
+    }
+
+    // Reactivate indicator objects (they'll remain hidden until moving)
+    for (const g of this.pathSegments) g.setActive(true);
+    if (this.arrowG) this.arrowG.setActive(true);
+
+    this.isInside = false;
+    this.insideData = { containerId, reason: 'TAKEN_OUT' };
+
+    this.setIdleFacing();
+    this._syncDepthAndShadow();
   }
 
   // ---------------------------
@@ -204,7 +306,8 @@ export class NPC {
     allowBlockedStart = true,
     allowBlockedGoal = false,
     allowBlockedPath = false,
-    showIndicator = true,
+    allowWeakCollision = false,
+    showIndicator = false,
     indicatorColor = 0x33ff77
   } = {}
   ) {
@@ -215,11 +318,19 @@ export class NPC {
     // If indicator is disabled, hide any existing indicator now
     if (!this.showPathIndicator) this._hideIndicator();
 
-    if (!allowBlockedGoal && this.GRID.isBlocked(goalX, goalY)) {
+    const blockedArgs = { allowWeak: allowWeakCollision };
+
+    // If goal is blocked and you're not allowing blocked-goal/path, fail early.
+    // NOTE: weak-collision tiles are treated as walkable if allowWeakCollision is true.
+    if ((!allowBlockedGoal && !allowBlockedPath) && this.GRID.isBlocked(goalX, goalY, blockedArgs)) {
+      // console.warn(`NPC ${this.id} cannot go to blocked goal tile (${goalX}, ${goalY}) with current pathfinding options.`);
+      // console.log(`NpcX: ${this.tileX}, NpcY: ${this.tileY}, allowBlockedStart: ${allowBlockedStart}, allowBlockedGoal: ${allowBlockedGoal}, allowBlockedPath: ${allowBlockedPath}, allowWeakCollision: ${allowWeakCollision}`);
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.GOAL_BLOCKED,
         goalX,
-        goalY
+        goalY,
+        npcX: this.tileX,
+        npcY: this.tileY
       });
       return false;
     }
@@ -227,13 +338,27 @@ export class NPC {
     const path = findPath(this.GRID, this.tileX, this.tileY, goalX, goalY, {
       allowBlockedStart,
       allowBlockedGoal,
-      allowBlockedPath
+      allowBlockedPath,
+      allowWeakCollision // NEW: passed through
     });
-    if (!path || path.length <= 1) {
+
+    if (path && path.length === 1) {
+      return true;
+    }
+
+    if (!path || path.length <= 0) {
+      // console.warn(`NPC ${this.id} cannot find path to (${goalX}, ${goalY}) with current pathfinding options.`);
+      // console.log(`NpcX: ${this.tileX}, NpcY: ${this.tileY}, allowBlockedStart: ${allowBlockedStart}, allowBlockedGoal: ${allowBlockedGoal}, allowBlockedPath: ${allowBlockedPath}, allowWeakCollision: ${allowWeakCollision}`);
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.NO_PATH,
         goalX,
-        goalY
+        goalY,
+        npcX: this.tileX,
+        npcY: this.tileY,
+        allowBlockedStart,
+        allowBlockedGoal,
+        allowBlockedPath,
+        allowWeakCollision 
       });
       return false;
     }
@@ -295,11 +420,28 @@ export class NPC {
     this.sprite.anims.setProgress(0);
   }
 
+  setFacing(direction) {
+    if (!this.sprite) return;
+
+    this.facing = direction; // update internal state
+
+    const key = this._animKey(direction);
+
+    this.sprite.anims.play(key, true);
+    this.sprite.anims.pause();
+}
+
   // ---------------------------
   // Per-frame update
   // ---------------------------
   update() {
+    const c = this.getController();
+    c?.update?.();
+    
     if (!this.sprite) return;
+
+    // If "inside", we do nothing and don’t even touch depth/indicator
+    if (this.isInside) return;
 
     // Not moving -> hide indicator + keep depth correct
     if (this.state !== 'MOVING' || !this.targetNode) {
@@ -316,8 +458,7 @@ export class NPC {
 
     if (distance < this.speed) {
       // snap to target node
-      this.sprite.x = targetWorld.x;
-      this.sprite.y = targetWorld.y;
+      this._setSpriteWorld(targetWorld.x, targetWorld.y);
 
       this.tileX = this.targetNode.x;
       this.tileY = this.targetNode.y;
@@ -388,19 +529,18 @@ export class NPC {
   }
 
   _syncDepthAndShadow() {
-        if (!this.sprite) return;
+    if (!this.sprite) return;
 
-        // Always depth sprite first
-        this.sprite.setDepth(this.sprite.y);
+    // depth uses sprite.y + optional depthOffset
+    this.sprite.setDepth(this.sprite.y + this.depthOffset);
 
-        if (!this.shadow) return;
+    if (!this.shadow) return;
 
-        // Follow sprite
-        this.shadow.x = this.sprite.x;
-        this.shadow.y = this.sprite.y - 8;
+    this.shadow.x = this.sprite.x;
+    this.shadow.y = this.sprite.y + this.shadowOffsetY;
 
-        // Always under sprite
-        this.shadow.setDepth(this.sprite.y - 1);
+    // always under sprite
+    this.shadow.setDepth((this.sprite.y + this.depthOffset) - 1);
   }
 
   _hideIndicator() {
@@ -594,5 +734,30 @@ export class NPC {
     st.lastColor = color;
     st.lastCacheRef = this.pathCache;
     st.lastArrowY = lastPt.y;
+  }
+
+  setPositionOffset(px = 0, py = 0) {
+  this.posOffsetX = px;
+  this.posOffsetY = py;
+
+  // immediately apply if visible
+  if (this.sprite && !this.isInside) {
+      // re-place from current tile to avoid drifting
+      const pos = this.GRID.tileToWorld(this.tileX, this.tileY);
+      this.sprite.x = pos.x + this.posOffsetX;
+      this.sprite.y = pos.y + this.posOffsetY;
+      this._syncDepthAndShadow();
+    }
+  }
+
+  setDepthOffset(d = 0) {
+    this.depthOffset = d;
+    if (this.sprite && !this.isInside) this._syncDepthAndShadow();
+  }
+
+  _setSpriteWorld(x, y) {
+    // All movement/teleports should go through this
+    this.sprite.x = x + this.posOffsetX;
+    this.sprite.y = y + this.posOffsetY;
   }
 }

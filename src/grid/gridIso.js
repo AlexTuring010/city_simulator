@@ -14,13 +14,22 @@ export function makeGridIso(map, collisionLayer, originX, originY) {
   const step = tileH;
 
   // Runtime collision overrides (base-1 tile keys)
-  const blockedExtra = new Set();
+  // Strong always blocks, weak blocks unless allowWeak=true in isBlocked()
+  const blockedExtraStrong = new Set();
+  const blockedExtraWeak = new Set();
   const keyOf = (tX, tY) => `${tX},${tY}`;
 
   // Optional: if you want to “paint” collision tiles into the layer too.
   // Pick a tile index that exists in your collision tileset.
   // If your collisionLayer is invisible anyway, any valid index works.
   const DEFAULT_COLLIDE_TILE_INDEX = 1;
+
+  // Property keys (keep as constants to avoid inconsistent casing)
+  const PROP_COLLIDES = "collides";
+  const PROP_WEAK = "WeakCollision";
+
+  // Tiny helper: safely read a tile boolean property
+  const tilePropBool = (tile, key) => !!(tile && tile.properties && tile.properties[key]);
 
   return {
     // geometry
@@ -55,32 +64,72 @@ export function makeGridIso(map, collisionLayer, originX, originY) {
     // ---------------------------
     // Runtime blocked overrides
     // ---------------------------
-    isBlockedExtra(tX, tY) {
-      return blockedExtra.has(keyOf(tX, tY));
-    },
-
-    setBlocked(tX, tY, blocked = true, { mirrorToLayer = false, tileIndex = DEFAULT_COLLIDE_TILE_INDEX } = {}) {
-      if (!this.inBounds(tX, tY)) return false;
-
+    isBlockedExtra(tX, tY, { allowWeak = false } = {}) {
       const k = keyOf(tX, tY);
 
-      if (blocked) blockedExtra.add(k);
-      else blockedExtra.delete(k);
+      // Strong runtime block always blocks
+      if (blockedExtraStrong.has(k)) return true;
 
-      // Optional: mirror to collision layer so your current player collision code works unchanged
+      // Weak runtime block blocks unless allowWeak
+      if (blockedExtraWeak.has(k) && !allowWeak) return true;
+
+      return false;
+    },
+
+    /**
+     * Set runtime blocked override.
+     * - strong blocks always
+     * - weak blocks only when allowWeak=false in isBlocked()
+     *
+     * Optionally mirror to tile layer and mark weak/strong there too.
+     */
+    setBlocked(
+      tX,
+      tY,
+      blocked = true,
+      {
+        mirrorToLayer = false,
+        tileIndex = DEFAULT_COLLIDE_TILE_INDEX,
+        weak = false
+      } = {}
+    ) {
+      if (!this.inBounds(tX, tY)) return false;
+      const k = keyOf(tX, tY);
+
+      // Always clear from both sets first (so flipping weak/strong is clean)
+      blockedExtraStrong.delete(k);
+      blockedExtraWeak.delete(k);
+
+      if (blocked) {
+        (weak ? blockedExtraWeak : blockedExtraStrong).add(k);
+      }
+
+      // Optional: mirror to collision layer so other code that still reads the layer works unchanged
       if (mirrorToLayer && collisionLayer) {
         const lx = tX - 1;
         const ly = tY - 1;
 
         if (blocked) {
           const tile = collisionLayer.putTileAt(tileIndex, lx, ly);
-          // Make sure properties exist and are set
-          tile.setProperties({ ...(tile.properties || {}), collides: true });
+
+          // Phaser version-safe: some builds don't have tile.setProperties()
+          if (tile) {
+            tile.properties = tile.properties || {};
+            // Strong vs weak collision flags
+            tile.properties[PROP_COLLIDES] = !weak;
+            tile.properties[PROP_WEAK] = !!weak;
+          }
         } else {
-          // remove tile or at least clear collides property
-          const tile = collisionLayer.getTileAt(lx, ly);
-          if (tile) tile.setProperties({ ...(tile.properties || {}), collides: false });
-          // or: collisionLayer.removeTileAt(lx, ly);
+          // cleanest: actually remove the tile
+          collisionLayer.removeTileAt(lx, ly);
+
+          // If you prefer not removing, do:
+          // const tile = collisionLayer.getTileAt(lx, ly);
+          // if (tile) {
+          //   tile.properties = tile.properties || {};
+          //   tile.properties[PROP_COLLIDES] = false;
+          //   tile.properties[PROP_WEAK] = false;
+          // }
         }
       }
 
@@ -92,15 +141,35 @@ export function makeGridIso(map, collisionLayer, originX, originY) {
     },
 
     resetBlockedExtra() {
-      blockedExtra.clear();
+      blockedExtraStrong.clear();
+      blockedExtraWeak.clear();
     },
 
-    isBlocked(tX, tY) {
-      if (!this.inBounds(tX, tY)) return true; // treat out-of-bounds as blocked (usually what you want)
-      if (this.isBlockedExtra(tX, tY)) return true;
+    /**
+     * Collision query.
+     * - Out-of-bounds is blocked.
+     * - Runtime strong blocks always block.
+     * - Runtime weak blocks block unless allowWeak is true.
+     * - Tile-layer "collides" always blocks.
+     * - Tile-layer "WeakCollision" blocks unless allowWeak is true.
+     */
+    isBlocked(tX, tY, { allowWeak = false } = {}) {
+      if (!this.inBounds(tX, tY)) return true; // treat out-of-bounds as blocked
+
+      // Runtime overrides (strong/weak aware)
+      if (this.isBlockedExtra(tX, tY, { allowWeak })) return true;
 
       const tile = this.getTile(tX, tY);
-      return !!(tile && tile.properties && tile.properties.collides);
+      if (!tile) return false;
+
+      // Strong tile collision always blocks
+      if (tilePropBool(tile, PROP_COLLIDES)) return true;
+
+      // Weak tile collision blocks unless allowWeak
+      const isWeak = tilePropBool(tile, PROP_WEAK);
+      if (isWeak && !allowWeak) return true;
+
+      return false;
     },
 
     // ---------------------------
@@ -114,9 +183,7 @@ export function makeGridIso(map, collisionLayer, originX, originY) {
     },
 
     // ---------------------------
-    // (Optional but VERY useful)
     // World pixels -> base-1 tile coords
-    // Lets player collision use GRID too.
     // ---------------------------
     worldToTile(worldX, worldY) {
       // Inverse of:

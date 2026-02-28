@@ -11,7 +11,11 @@
  */
 import { NPC } from '../sim/npc/index.js';
 import { makeGridIso } from '../grid/gridIso.js';
+import { EatOutController } from '../sim/controllers/EatOutController.js';
 import { RandomWanderController } from '../sim/controllers/RandomWanderController.js';
+import { RandomRestaurantGoal } from '../strategies/RandomRestaurantGoal.js';
+import { Store, STORE_EVENTS } from '../sim/store/Store.js';
+import { Table } from '../sim/store/Table.js';
 
 export const mainScene = {
   key: 'MainScene',
@@ -46,6 +50,17 @@ export const mainScene = {
       frameHeight: 32
     });
     this.load.spritesheet('npc_sprite2', 'assets/person_tiles2.png', {
+      frameWidth: 32,
+      frameHeight: 32
+    });
+
+    // Store and table spritesheets 
+    this.load.spritesheet('stores', 'assets/stores_160x138.png', {
+      frameWidth: 160,
+      frameHeight: 138
+    });
+
+    this.load.spritesheet('table', 'assets/tables.png', {
       frameWidth: 32,
       frameHeight: 32
     });
@@ -84,6 +99,22 @@ export const mainScene = {
     const createIsoSprite = (object) => {
       const mappedInfo = gidMap[object.gid];
       if (!mappedInfo) return null;
+
+      // ---- Check IsVisible property ----
+      let isVisible = true;
+
+      if (object.properties) {
+        if (Array.isArray(object.properties)) {
+          const prop = object.properties.find(
+            p => p.name.toLowerCase() === 'isvisible'
+          );
+          if (prop) isVisible = prop.value !== false;
+        } else if (object.properties.IsVisible !== undefined) {
+          isVisible = object.properties.IsVisible !== false;
+        }
+      }
+
+      if (!isVisible) return null;
 
       // Convert snapped object position -> base-1 tile coords
       const t = this.GRID.objectToTile(object.x, object.y);
@@ -124,6 +155,73 @@ export const mainScene = {
       if (this.mascot) this.cameras.main.startFollow(this.mascot, true, 0.1, 0.1);
     }
 
+    // --- STORES ---
+    const storeObjects = map.getObjectLayer('stores')?.objects || [];
+    this.stores = {}; // store_id -> Store
+
+    for (const obj of storeObjects) {
+      // objects are indicators; we construct stores from them
+      const t = this.GRID.objectToTile(obj.x, obj.y);
+
+      // read properties safely
+      const props = {};
+      if (Array.isArray(obj.properties)) {
+        for (const p of obj.properties) props[p.name] = p.value;
+      } else if (obj.properties) {
+        Object.assign(props, obj.properties);
+      }
+
+      const storeId = Number(props.store_id);
+      const indoorsCapacity = Number(props.indoors_capacity ?? 0);
+      const storeType = String(props.store_type ?? 'left_restaurant');
+
+      if (!Number.isFinite(storeId)) continue;
+
+      const store = new Store(this, this.GRID, t.x, t.y, {
+        storeId,
+        indoorsCapacity,
+        storeType
+      });
+
+      // (optional) listen to queue ready signals
+      store.on(STORE_EVENTS.READY, ({ npc }) => {
+        // This is the handshake: store says "you can enter now".
+        // NPC-side logic decides whether to accept.
+        // Example auto-accept:
+        store.acceptInvite(npc);
+        store.moveNpcIndoors(npc).catch(() => {
+          // if movement failed, free spot for others (since we didn't actually add indoors)
+          store._onSpotFreed?.();
+        });
+      });
+
+      this.stores[storeId] = store;
+    }
+
+    // --- TABLES ---
+    const tableObjects = map.getObjectLayer('tables')?.objects || [];
+    for (const obj of tableObjects) {
+      const t = this.GRID.objectToTile(obj.x, obj.y);
+
+      const props = {};
+      if (Array.isArray(obj.properties)) {
+        for (const p of obj.properties) props[p.name] = p.value;
+      } else if (obj.properties) {
+        Object.assign(props, obj.properties);
+      }
+
+      const belongsTo = Number(props.belongs_to);
+      if (!Number.isFinite(belongsTo)) continue;
+
+      // choose frame: 0 = no chairs, 1 = chairs (adjust to match your png)
+      const frame = Number(props.has_chairs ?? 1) ? 1 : 0;
+
+      const table = new Table(this, this.GRID, t.x, t.y, { belongsTo, frame });
+
+      const store = this.stores[belongsTo];
+      if (store) store.addTable(table);
+    }
+    
     // Input
     this.cursors = this.input.keyboard.createCursorKeys();
 
@@ -145,16 +243,42 @@ export const mainScene = {
     if (spawnerObjects.length > 0) {
       const maxNPCs = 100;
 
+      // Factory keeps EatOutController independent
+      const wanderFactory = (scene, npc, GRID) =>
+      new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
+
       for (let i = 0; i < maxNPCs; i++) {
         const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
-
         const t = this.GRID.objectToTile(spawner.x, spawner.y);
 
         // 50 / 50 split
         const type = Math.random() < 0.5 ? 'type2' : 'type1';
 
         const npc = new NPC(this, this.GRID, t.x, t.y, { type });
-        npc.controller = new RandomWanderController(this, npc, this.GRID);
+
+        window.debugNpc = npc;
+        window.debugScene = this.scene;
+        // Each NPC has a strategy to acquire a restaurant/store goal, and an EatOutController to execute it
+        // For example, one NPC may walk around scanning, another may use google maps, onother may use Crowdless
+        const strategy = new RandomRestaurantGoal(this, this.GRID, this.stores);
+      
+        // Start with EatOutController (it will push Wander temporarily after eating)
+        const eatCtrl = new EatOutController(this, npc, this.GRID, this.stores, strategy, {
+          eatMode: 'auto',            // 'auto' | 'indoors' | 'table'
+          queueLoiterRadius: 4,
+          queueLoiterStepMinMs: 700,
+          queueLoiterStepMaxMs: 1800,
+          loiterMaxRadiusSearch: 25,
+          eatMinMs: 4000,
+          eatMaxMs: 12000,
+          postEatWanderMinMs: 5000,
+          postEatWanderMaxMs: 12000,
+          wanderFactory
+        });
+
+        window.debugNpcs = this.npcs;
+
+        npc.setController(eatCtrl);
 
         this.npcs[npc.id] = npc;
       }
@@ -190,9 +314,12 @@ export const mainScene = {
     ];
 
     let isBlocked = false;
+
     for (const p of checkPoints) {
-      const tile = this.collisionLayer.getTileAtWorldXY(p.x, p.y);
-      if (tile && tile.properties && tile.properties.collides) {
+      // Convert world → BASE-1 tile
+      const { x: tX, y: tY } = this.GRID.worldToTile(p.x, p.y);
+
+      if (this.GRID.isBlocked(tX, tY, { allowWeak: false })) {
         isBlocked = true;
         break;
       }
