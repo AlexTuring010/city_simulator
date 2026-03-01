@@ -1,14 +1,14 @@
 // src/scenes/mainScene.js
 
 /**
- * Main Scene
- * ----------
- * Owns Phaser concerns (map, layers, sprites, input).
- * Uses GRID as the single source of truth for:
- * - object snapping -> base-1 tile coords
- * - base-1 tile -> world pixels
- * - collision queries (via GRID.isBlocked when needed)
+ * Main Scene (Simulator)
+ * ----------------------
+ * - No player
+ * - Drag to pan (nice feel + cursor changes)
+ * - Mouse wheel zoom (normal zoom, NOT towards cursor)
+ * - Optional inertia + padded bounds so you can pan freely
  */
+
 import { NPC } from '../sim/npc/index.js';
 import { makeGridIso } from '../grid/gridIso.js';
 import { EatOutController } from '../sim/controllers/EatOutController.js';
@@ -20,16 +20,15 @@ import { Table } from '../sim/store/Table.js';
 export const mainScene = {
   key: 'MainScene',
 
-  // --------------------------
-  // Scene-level state
-  // --------------------------
-  mascot: null,
-  cursors: null,
   collisionLayer: null,
   wallSprites: [],
   npcs: {},
   mapRef: null,
   GRID: null,
+  stores: null,
+
+  // camera drag state
+  _camDrag: null,
 
   preload() {
     const mapData = this.cache.tilemap.get('map').data;
@@ -54,7 +53,7 @@ export const mainScene = {
       frameHeight: 32
     });
 
-    // Store and table spritesheets 
+    // Store and table spritesheets
     this.load.spritesheet('stores', 'assets/stores_160x138.png', {
       frameWidth: 160,
       frameHeight: 138
@@ -105,14 +104,10 @@ export const mainScene = {
 
       if (object.properties) {
         if (Array.isArray(object.properties)) {
-          const prop = object.properties.find(
-            p => p.name.toLowerCase() === 'isvisible'
-          );
+          const prop = object.properties.find(p => p.name.toLowerCase() === 'isvisible');
           if (prop) isVisible = prop.value !== false;
-          console.log('Found IsVisible property in array properties');
         } else if (object.properties.IsVisible !== undefined) {
           isVisible = object.properties.IsVisible !== false;
-          console.log('Found IsVisible property in non-array properties; consider using array format for consistency');
         }
       }
 
@@ -150,22 +145,13 @@ export const mainScene = {
       if (s) this.wallSprites.push(s);
     });
 
-    // Player
-    const playerObjects = map.getObjectLayer('Player')?.objects || [];
-    if (playerObjects.length > 0) {
-      this.mascot = createIsoSprite(playerObjects[0]);
-      if (this.mascot) this.cameras.main.startFollow(this.mascot, true, 0.1, 0.1);
-    }
-
     // --- STORES ---
     const storeObjects = map.getObjectLayer('stores')?.objects || [];
     this.stores = {}; // store_id -> Store
 
     for (const obj of storeObjects) {
-      // objects are indicators; we construct stores from them
       const t = this.GRID.objectToTile(obj.x, obj.y);
 
-      // read properties safely
       const props = {};
       if (Array.isArray(obj.properties)) {
         for (const p of obj.properties) props[p.name] = p.value;
@@ -185,14 +171,9 @@ export const mainScene = {
         storeType
       });
 
-      // (optional) listen to queue ready signals
       store.on(STORE_EVENTS.READY, ({ npc }) => {
-        // This is the handshake: store says "you can enter now".
-        // NPC-side logic decides whether to accept.
-        // Example auto-accept:
         store.acceptInvite(npc);
         store.moveNpcIndoors(npc).catch(() => {
-          // if movement failed, free spot for others (since we didn't actually add indoors)
           store._onSpotFreed?.();
         });
       });
@@ -215,7 +196,6 @@ export const mainScene = {
       const belongsTo = Number(props.belongs_to);
       if (!Number.isFinite(belongsTo)) continue;
 
-      // choose frame: 0 = no chairs, 1 = chairs (adjust to match your png)
       const frame = Number(props.has_chairs ?? 1) ? 1 : 0;
 
       const table = new Table(this, this.GRID, t.x, t.y, { belongsTo, frame });
@@ -223,50 +203,43 @@ export const mainScene = {
       const store = this.stores[belongsTo];
       if (store) store.addTable(table);
     }
-    
-    // Input
-    this.cursors = this.input.keyboard.createCursorKeys();
 
+    // --------------------------
     // NPC animations
-    this.anims.create({ key: 'npc_walk_down',  frames: this.anims.generateFrameNumbers('npc_sprite', { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
-    this.anims.create({ key: 'npc_walk_right', frames: this.anims.generateFrameNumbers('npc_sprite', { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
-    this.anims.create({ key: 'npc_walk_up',    frames: this.anims.generateFrameNumbers('npc_sprite', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
-    this.anims.create({ key: 'npc_walk_left',  frames: this.anims.generateFrameNumbers('npc_sprite', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
+    // --------------------------
+    this.anims.create({ key: 'npc_walk_down',  frames: this.anims.generateFrameNumbers('npc_sprite',  { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_right', frames: this.anims.generateFrameNumbers('npc_sprite',  { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_up',    frames: this.anims.generateFrameNumbers('npc_sprite',  { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_left',  frames: this.anims.generateFrameNumbers('npc_sprite',  { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
 
     this.anims.create({ key: 'npc_walk_down2',  frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
     this.anims.create({ key: 'npc_walk_right2', frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
     this.anims.create({ key: 'npc_walk_up2',    frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
     this.anims.create({ key: 'npc_walk_left2',  frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
 
+    // --------------------------
     // Spawn NPCs
+    // --------------------------
     const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
     this.npcs = {};
 
     if (spawnerObjects.length > 0) {
       const maxNPCs = 200;
 
-      // Factory keeps EatOutController independent
       const wanderFactory = (scene, npc, GRID) =>
-      new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
+        new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
 
       for (let i = 0; i < maxNPCs; i++) {
         const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
         const t = this.GRID.objectToTile(spawner.x, spawner.y);
 
-        // 50 / 50 split
         const type = Math.random() < 0.5 ? 'type2' : 'type1';
-
         const npc = new NPC(this, this.GRID, t.x, t.y, { type });
 
-        window.debugNpc = npc;
-        window.debugScene = this.scene;
-        // Each NPC has a strategy to acquire a restaurant/store goal, and an EatOutController to execute it
-        // For example, one NPC may walk around scanning, another may use google maps, onother may use Crowdless
         const strategy = new RandomRestaurantGoal(this, this.GRID, this.stores);
-      
-        // Start with EatOutController (it will push Wander temporarily after eating)
+
         const eatCtrl = new EatOutController(this, npc, this.GRID, this.stores, strategy, {
-          eatMode: 'auto',            // 'auto' | 'indoors' | 'table'
+          eatMode: 'auto',
           queueLoiterRadius: 4,
           queueLoiterStepMinMs: 700,
           queueLoiterStepMaxMs: 1800,
@@ -278,60 +251,109 @@ export const mainScene = {
           wanderFactory
         });
 
-        window.debugNpcs = this.npcs;
-
         npc.setController(eatCtrl);
-
         this.npcs[npc.id] = npc;
       }
     }
+
+    // --------------------------
+    // Simulator Camera Controls (improved)
+    // --------------------------
+    const cam = this.cameras.main;
+
+    // IMPORTANT: iso scenes often "feel restricted" with normal bounds.
+    // Option A (recommended): padded bounds so you can pan further.
+    // Option B: comment out bounds entirely to allow infinite panning.
+    const PAD = 2000; // increase if you still feel restricted
+    cam.setBounds(
+      -PAD,
+      -PAD,
+      map.widthInPixels + PAD * 2,
+      map.heightInPixels + PAD * 2
+    );
+
+    // Cursor feel
+    this.input.setDefaultCursor('grab');
+    this.input.mouse.disableContextMenu();
+
+    // Drag + inertia state
+    this._camDrag = {
+      isDragging: false,
+      vx: 0,
+      vy: 0
+    };
+
+    // Drag to pan using pointer delta (feels much nicer than "start point" math)
+    this.input.on('pointerdown', (pointer) => {
+      if (pointer.leftButtonDown() || pointer.rightButtonDown()) {
+        this._camDrag.isDragging = true;
+        this._camDrag.vx = 0;
+        this._camDrag.vy = 0;
+        this.input.setDefaultCursor('grabbing');
+      }
+    });
+
+    this.input.on('pointerup', () => {
+      this._camDrag.isDragging = false;
+      this.input.setDefaultCursor('grab');
+    });
+
+    this.input.on('pointermove', (pointer) => {
+      if (!this._camDrag.isDragging) return;
+
+      // delta in screen space -> translate into world scroll
+      // divide by zoom so drag speed feels consistent at all zoom levels
+      const dx = (pointer.x - pointer.prevPosition.x) / cam.zoom;
+      const dy = (pointer.y - pointer.prevPosition.y) / cam.zoom;
+
+      cam.scrollX -= dx;
+      cam.scrollY -= dy;
+
+      // store velocity for inertia (simple)
+      this._camDrag.vx = -dx;
+      this._camDrag.vy = -dy;
+    });
+
+    // Zoom (NORMAL zoom, not towards cursor)
+    const minZoom = 0.5;
+    const maxZoom = 2.0;
+    const zoomStep = 0.1;
+
+    this.input.on('wheel', (pointer, gameObjects, deltaX, deltaY) => {
+      const oldZoom = cam.zoom;
+      const newZoom = Phaser.Math.Clamp(
+        oldZoom + (deltaY > 0 ? -zoomStep : zoomStep),
+        minZoom,
+        maxZoom
+      );
+      if (newZoom !== oldZoom) cam.setZoom(newZoom);
+    });
   },
 
-  update() {
+  update(time, delta) {
     // Update NPCs
     Object.values(this.npcs).forEach(npc => npc.update());
 
-    // Player movement
-    if (!this.mascot || !this.collisionLayer) return;
+    // Camera inertia (smooth glide) when not dragging
+    if (!this._camDrag) return;
 
-    const speed = 2;
-    let vx = 0;
-    let vy = 0;
+    const cam = this.cameras.main;
 
-    if (this.cursors.left.isDown)       { vx = -speed; vy = -speed / 2; }
-    else if (this.cursors.right.isDown) { vx =  speed; vy =  speed / 2; }
-    else if (this.cursors.up.isDown)    { vx =  speed; vy = -speed / 2; }
-    else if (this.cursors.down.isDown)  { vx = -speed; vy =  speed / 2; }
+    if (!this._camDrag.isDragging) {
+      // friction: tweak for taste (closer to 1 = more glide)
+      const friction = 0.90;
 
-    const nextX = this.mascot.x + vx;
-    const nextY = this.mascot.y + vy;
+      this._camDrag.vx *= friction;
+      this._camDrag.vy *= friction;
 
-    const offsetX = 14;
-    const offsetY = 7;
-    const checkPoints = [
-      { x: nextX, y: nextY },
-      { x: nextX - offsetX, y: nextY - offsetY },
-      { x: nextX + offsetX, y: nextY - offsetY },
-      { x: nextX, y: nextY - 2 * offsetY }
-    ];
+      // stop when tiny
+      if (Math.abs(this._camDrag.vx) < 0.01) this._camDrag.vx = 0;
+      if (Math.abs(this._camDrag.vy) < 0.01) this._camDrag.vy = 0;
 
-    let isBlocked = false;
-
-    for (const p of checkPoints) {
-      // Convert world → BASE-1 tile
-      const { x: tX, y: tY } = this.GRID.worldToTile(p.x, p.y);
-
-      if (this.GRID.isBlocked(tX, tY, { allowWeak: false })) {
-        isBlocked = true;
-        break;
+      if (this._camDrag.vx || this._camDrag.vy) {
+        cam.scrollX += this._camDrag.vx;
+        cam.scrollY += this._camDrag.vy;
       }
     }
-
-    if (!isBlocked) {
-      this.mascot.x = nextX;
-      this.mascot.y = nextY;
-    }
-
-    this.mascot.setDepth(this.mascot.y);
   }
 };

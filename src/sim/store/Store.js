@@ -31,7 +31,7 @@ const STORE_TYPE_CONFIG = {
     footprint: { w: 4, h: 4, ox: 0, oy: 1 },
     entryOffset: { x: 2, y: 2 },
     insideTileOffset: { x: 2, y: 1 },
-    DepthOffset: 32
+    DepthOffset: 18
   }
 };
 
