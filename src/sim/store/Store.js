@@ -24,14 +24,18 @@ const STORE_TYPE_CONFIG = {
     row: 0,
     footprint: { w: 4, h: 4, ox: 1, oy: 0 },
     insideTileOffset: { x: 1, y: 1 },
-    DepthOffset: 32
+    DepthOffset: 18,
+    labelOffset: { x: 0, y: -128 },     // world px relative to sprite position
+    labelDepthOffset: 2                 // draws above building
   },
   right_restaurant: {
     row: 1,
     footprint: { w: 4, h: 4, ox: 0, oy: 1 },
     entryOffset: { x: 2, y: 2 },
     insideTileOffset: { x: 2, y: 1 },
-    DepthOffset: 18
+    DepthOffset: 18,
+    labelOffset: { x: 0, y: -120 }, 
+    labelDepthOffset: 2    
   }
 };
 
@@ -104,6 +108,12 @@ export class Store {
     this._autoMaxQueue = (maxQueue == null);
     this.maxQueue = maxQueue ?? 4;
     this._recomputeDefaultMaxQueue();
+
+    // --- capacity label ---
+    this._label = null;
+    this._lastLabel = '';
+    this._createCapacityLabel();
+    this._refreshCapacityLabel(true);
   }
 
   // ---------------- visuals/collision ----------------
@@ -149,7 +159,119 @@ export class Store {
     });
   }
 
+  _getColorForRatio(ratio) {
+    // ratio: 0 (empty) → 1 (full)
+
+    // Hue 120 = green
+    // Hue 0 = red
+    const hue = 120 - (120 * ratio);  // 120 → 0
+
+    const color = Phaser.Display.Color.HSVToRGB(hue / 360, 1, 1);
+
+    return Phaser.Display.Color.RGBToString(
+      color.r,
+      color.g,
+      color.b,
+      0,
+      '#'
+    );
+  }
+
+  _getOccupancyRatio() {
+    const cap = this.getServiceCapacity();
+    if (cap <= 0) return 0;
+
+    const occupied =
+      (this.indoorsCapacity - this._freeIndoor) +
+      this._countOccupiedTableSeats();
+
+    return Phaser.Math.Clamp(occupied / cap, 0, 1);
+  }
+
+  _createCapacityLabel() {
+    const off = this._typeCfg?.labelOffset ?? { x: 0, y: -64 };
+    const depthOff = this._typeCfg?.labelDepthOffset ?? 2;
+
+    // anchor label to building sprite position
+    const x = (this.sprite?.x ?? 0) + off.x;
+    const y = (this.sprite?.y ?? 0) + off.y;
+
+    // Use Text or BitmapText depending on your art style.
+    // BitmapText is crisper for pixel art if you have a bitmap font loaded.
+    this._label = this.scene.add.text(x, y, '', {
+      fontFamily: 'monospace',
+      fontSize: '14px',
+      color: '#ff0000',
+      stroke: '#000000',
+      strokeThickness: 3
+    });
+
+    this._label.setOrigin(0.5, 1);
+
+    // critical: draw above building
+    const baseDepth = this.sprite?.depth ?? 0;
+    this._label.setDepth(baseDepth + depthOff);
+  }
+
+  _updateLabelTransform() {
+    if (!this._label || !this.sprite) return;
+
+    const off = this._typeCfg?.labelOffset ?? { x: 0, y: -64 };
+    const depthOff = this._typeCfg?.labelDepthOffset ?? 2;
+
+    this._label.setPosition(this.sprite.x + off.x, this.sprite.y + off.y);
+    this._label.setDepth((this.sprite.depth ?? 0) + depthOff);
+  }
+
+  _computeCapacityText() {
+    const cap = this.getServiceCapacity();
+    if (cap <= 0) return '0%';
+
+    const occupied = (this.indoorsCapacity - this._freeIndoor) + this._countOccupiedTableSeats();
+    const pct = Math.round((occupied / cap) * 100);
+
+    const q = this.queued.size;
+    return q > 0 ? `${pct}% +${q}` : `${pct}%`;
+  }
+
+  _countOccupiedTableSeats() {
+    let occ = 0;
+    for (const seats of this._tableSeats.values()) {
+      if (seats[0] != null) occ++;
+      if (seats[1] != null) occ++;
+    }
+    return occ;
+  }
+
+  _refreshCapacityLabel(force = false) {
+    if (!this._label) return;
+
+    const ratio = this._getOccupancyRatio();
+    const pct = Math.round(ratio * 100);
+    const q = this.queued.size;
+
+    const text = q > 0
+      ? `${pct}% +${q}`
+      : `${pct}%`;
+
+    if (!force && text === this._lastLabel) return;
+    this._lastLabel = text;
+
+    this._label.setText(text);
+
+    // 🎨 Dynamic color
+    const color = this._getColorForRatio(ratio);
+    this._label.setColor(color);
+
+    this._updateLabelTransform();
+  }
+
   destroy() {
+    if (this._label) {
+      this._label.destroy();
+      this._label = null;
+    }
+
     if (this._doorTimer) {
       this._doorTimer.remove(false);
       this._doorTimer = null;
@@ -203,13 +325,16 @@ export class Store {
     if (!this._tableSeats.has(tid)) this._tableSeats.set(tid, [null, null]);
 
     this._recomputeDefaultMaxQueue();
+    this._refreshCapacityLabel(true);
   }
 
   // ---------------- queue management ----------------
   removeFromQueue(npc) {
     const npcId = npc?.id;
     if (npcId == null) return false;
-    return this.queued.delete(npcId); // lazy deletion
+    const removed = this.queued.delete(npcId);
+    if (removed) this._refreshCapacityLabel();
+    return removed;
   }
 
   // ---------------- main API ----------------
@@ -231,6 +356,7 @@ export class Store {
     // Try assign immediately
     const placement = this._assignNow(npcId);
     if (placement) {
+      this._refreshCapacityLabel();
       return { ok: true, status: 'ASSIGNED', ...this._buildPayload(npcId, placement) };
     }
 
@@ -241,6 +367,7 @@ export class Store {
 
     this.queued.add(npcId);
     this.queue.push(npc);
+    this._refreshCapacityLabel();
 
     return { ok: false, status: 'QUEUED' };
   }
@@ -256,6 +383,7 @@ export class Store {
 
     // now that space exists, call from queue immediately
     this._drainQueue();
+    this._refreshCapacityLabel();
 
     return true;
   }
@@ -378,6 +506,7 @@ export class Store {
 
       // Emit: called_to_enter (your rule: no handshake)
       this._emitCalledToEnter(npc, placement);
+      this._refreshCapacityLabel();
     }
   }
 

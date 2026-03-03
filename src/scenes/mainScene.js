@@ -213,7 +213,7 @@ export const mainScene = {
     this.npcs = {};
 
     if (spawnerObjects.length > 0) {
-      const maxNPCs = 100;
+      const maxNPCs = 200;
 
       const wanderFactory = (scene, npc, GRID) =>
         new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
