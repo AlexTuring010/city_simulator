@@ -7,6 +7,7 @@
  * - Drag to pan (nice feel + cursor changes)
  * - Mouse wheel zoom (normal zoom, NOT towards cursor)
  * - Optional inertia + padded bounds so you can pan freely
+ * - Google Maps Heatmap: map tilemap corners -> visible map corners
  */
 
 import { NPC } from '../sim/npc/index.js';
@@ -43,36 +44,25 @@ export const mainScene = {
       });
     });
 
-    // NPC spritesheet
-    this.load.spritesheet('npc_sprite', 'assets/person_tiles.png', {
-      frameWidth: 32,
-      frameHeight: 32
-    });
-    this.load.spritesheet('npc_sprite2', 'assets/person_tiles2.png', {
-      frameWidth: 32,
-      frameHeight: 32
-    });
+    // NPC spritesheets
+    this.load.spritesheet('npc_sprite', 'assets/person_tiles.png', { frameWidth: 32, frameHeight: 32 });
+    this.load.spritesheet('npc_sprite2', 'assets/person_tiles2.png', { frameWidth: 32, frameHeight: 32 });
 
     // Store and table spritesheets
-    this.load.spritesheet('stores', 'assets/stores_160x138.png', {
-      frameWidth: 160,
-      frameHeight: 138
-    });
-
-    this.load.spritesheet('table', 'assets/tables.png', {
-      frameWidth: 32,
-      frameHeight: 32
-    });
+    this.load.spritesheet('stores', 'assets/stores_160x138.png', { frameWidth: 160, frameHeight: 138 });
+    this.load.spritesheet('table', 'assets/tables.png', { frameWidth: 32, frameHeight: 32 });
   },
 
   create() {
+    // Init per-instance throttling state HERE (important in Phaser)
+    this._heat = {
+      lastMs: 0,
+      throttleMs: 150, // tune: 80..300ms
+      base1Tiles: true // your GRID comment suggests base-1 tile coords
+    };
+
     const map = this.make.tilemap({ key: 'map' });
     this.mapRef = map;
-
-    const heat = window.__HEAT__;
-    if (heat) {
-      heat.setGridSize(map.width, map.height); // tiles wide/high
-    }
 
     map.tilesets.forEach(ts => map.addTilesetImage(ts.name, ts.name));
     const tileset = map.tilesets;
@@ -181,8 +171,6 @@ export const mainScene = {
     }
 
     // --- TABLES ---
-    // Lets temporarily make it so it adds only one table to each store, for testing purposes. We can later add more tables per store if we want.
-    
     const tableObjects = map.getObjectLayer('tables')?.objects || [];
     for (const obj of tableObjects) {
       const t = this.GRID.objectToTile(obj.x, obj.y);
@@ -260,10 +248,7 @@ export const mainScene = {
     // --------------------------
     const cam = this.cameras.main;
 
-    // IMPORTANT: iso scenes often "feel restricted" with normal bounds.
-    // Option A (recommended): padded bounds so you can pan further.
-    // Option B: comment out bounds entirely to allow infinite panning.
-    const PAD = 2000; // increase if you still feel restricted
+    const PAD = 2000;
     cam.setBounds(
       -PAD,
       -PAD,
@@ -271,18 +256,15 @@ export const mainScene = {
       map.heightInPixels + PAD * 2
     );
 
-    // Cursor feel
     this.input.setDefaultCursor('grab');
     this.input.mouse.disableContextMenu();
 
-    // Drag + inertia state
     this._camDrag = {
       isDragging: false,
       vx: 0,
       vy: 0
     };
 
-    // Drag to pan using pointer delta (feels much nicer than "start point" math)
     this.input.on('pointerdown', (pointer) => {
       if (pointer.leftButtonDown() || pointer.rightButtonDown()) {
         this._camDrag.isDragging = true;
@@ -300,20 +282,16 @@ export const mainScene = {
     this.input.on('pointermove', (pointer) => {
       if (!this._camDrag.isDragging) return;
 
-      // delta in screen space -> translate into world scroll
-      // divide by zoom so drag speed feels consistent at all zoom levels
       const dx = (pointer.x - pointer.prevPosition.x) / cam.zoom;
       const dy = (pointer.y - pointer.prevPosition.y) / cam.zoom;
 
       cam.scrollX -= dx;
       cam.scrollY -= dy;
 
-      // store velocity for inertia (simple)
       this._camDrag.vx = -dx;
       this._camDrag.vy = -dy;
     });
 
-    // Zoom (NORMAL zoom, not towards cursor)
     const minZoom = 0.5;
     const maxZoom = 2.0;
     const zoomStep = 0.1;
@@ -339,13 +317,11 @@ export const mainScene = {
     const cam = this.cameras.main;
 
     if (!this._camDrag.isDragging) {
-      // friction: tweak for taste (closer to 1 = more glide)
       const friction = 0.90;
 
       this._camDrag.vx *= friction;
       this._camDrag.vy *= friction;
 
-      // stop when tiny
       if (Math.abs(this._camDrag.vx) < 0.01) this._camDrag.vx = 0;
       if (Math.abs(this._camDrag.vy) < 0.01) this._camDrag.vy = 0;
 
@@ -355,26 +331,42 @@ export const mainScene = {
       }
     }
 
-    const heat = window.__HEAT__;
-    if (heat && this.mapRef) {
-      const mapW = this.mapRef.width;   // tiles
-      const mapH = this.mapRef.height;  // tiles
+    // --------------------------
+    // Google Maps Heatmap update
+    // (tilemap corners -> visible map corners)
+    // --------------------------
+    const heat = window.__GM_HEAT__;
+    const tileToLatLngViewport = window.__tileToLatLngViewport__;
 
-      const points = [];
+    // Google script loads async; mapping may not be ready yet
+    if (!heat || !tileToLatLngViewport || !this.mapRef) return;
 
-      for (const npc of Object.values(this.npcs)) {
-        // IMPORTANT: your tile coords might be 1-based depending on GRID impl.
-        // If npc.tileX is 1..mapW, use (tileX-1). If it's 0..mapW-1, don't.
-        const tx0 = npc.tileX - 1; // <- change to `npc.tileX` if you’re 0-based
-        const ty0 = npc.tileY - 1; // <- change to `npc.tileY` if you’re 0-based
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (now - this._heat.lastMs < this._heat.throttleMs) return;
+    this._heat.lastMs = now;
 
-        const u = (tx0 + 0.5) / mapW;  // 0..1
-        const v = (ty0 + 0.5) / mapH;  // 0..1
+    const mapW = this.mapRef.width;   // tiles
+    const mapH = this.mapRef.height;  // tiles
 
-        points.push({ u, v });
-      }
+    const pts = [];
 
-      heat.drawNormalizedPoints(points);
+    for (const npc of Object.values(this.npcs)) {
+      const ll = tileToLatLngViewport(
+        npc.tileX,
+        npc.tileY,
+        mapW,
+        mapH,
+        { base1: this._heat.base1Tiles }
+      );
+
+      if (!ll) continue;
+
+      pts.push({
+        location: ll,
+        weight: 1
+      });
     }
+
+    heat.setData(pts);
   }
 };

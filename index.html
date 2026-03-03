@@ -5,14 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KnowsWhere - Isometric Test</title>
 
+  <!-- Phaser -->
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
 
-  <!-- Leaflet -->
-  <link
-    rel="stylesheet"
-    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-  />
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Google Maps + Heatmap (visualization library REQUIRED) -->
+  <script async
+    src="https://maps.googleapis.com/maps/api/js?key=AIzaSyDzZ9oTB26apv6rPt4OTeyhBvNBv_RPmYw&libraries=visualization">
+  </script>
 
   <style>
     html, body {
@@ -23,18 +22,11 @@
     }
 
     .layout {
-      /* half the screen height */
-      height: 50vh;
-
-      /* space from page edges */
-      margin: 48px;
-
-      /* center the row vertically a bit (optional) */
-      /* you can remove this if you want it at the top */
-      margin-top: 80px;
-
+      height: 50vh;           /* half screen height */
+      margin: 48px;           /* gap from page edges */
+      margin-top: 80px;       /* vertical offset */
       display: flex;
-      gap: 48px; /* bigger gap between game & map */
+      gap: 64px;              /* larger gap between game and map */
       box-sizing: border-box;
     }
 
@@ -49,25 +41,15 @@
       box-shadow: 0 0 20px rgba(0,0,0,0.5);
     }
 
-    /* Padding INSIDE the map panel so map doesn't touch edges */
     #map-wrap {
-      padding: 32px;
-      box-sizing: border-box;
+      padding: 0;
     }
 
-    /* Map and canvas must occupy the same inner box */
-    #map,
-    #heat-canvas {
+    #map {
       position: absolute;
-      top: 32px;
-      right: 32px;
-      bottom: 32px;
-      left: 32px;
+      inset: 0;          /* same as top/right/bottom/left: 0 */
+      border-radius: 12px;
     }
-
-    /* Ensure canvas is above map */
-    #map { z-index: 1; }
-    #heat-canvas { z-index: 2; pointer-events: none; }
   </style>
 </head>
 
@@ -77,7 +59,6 @@
 
     <div id="map-wrap">
       <div id="map"></div>
-      <canvas id="heat-canvas"></canvas>
     </div>
   </div>
 
