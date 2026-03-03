@@ -47,6 +47,7 @@ export class RandomWanderController {
     this._active = false;
     this._unbind();
     this._clearTimer();
+    this.npc?.stop?.('wander_stop');
   }
 
   update() {
@@ -95,6 +96,7 @@ export class RandomWanderController {
       if (this.GRID.isBlocked(goalX, goalY)) continue;
 
       if (this.npc.goToTile(goalX, goalY, {
+        allowWeakCollision: false,
       })) {
         return;
       }

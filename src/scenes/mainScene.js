@@ -14,7 +14,7 @@ import { makeGridIso } from '../grid/gridIso.js';
 import { EatOutController } from '../sim/controllers/EatOutController.js';
 import { RandomWanderController } from '../sim/controllers/RandomWanderController.js';
 import { RandomRestaurantGoal } from '../strategies/RandomRestaurantGoal.js';
-import { Store, STORE_EVENTS } from '../sim/store/Store.js';
+import { Store } from '../sim/store/Store.js';
 import { Table } from '../sim/store/Table.js';
 
 export const mainScene = {
@@ -68,6 +68,11 @@ export const mainScene = {
   create() {
     const map = this.make.tilemap({ key: 'map' });
     this.mapRef = map;
+
+    const heat = window.__HEAT__;
+    if (heat) {
+      heat.setGridSize(map.width, map.height); // tiles wide/high
+    }
 
     map.tilesets.forEach(ts => map.addTilesetImage(ts.name, ts.name));
     const tileset = map.tilesets;
@@ -168,20 +173,16 @@ export const mainScene = {
       const store = new Store(this, this.GRID, t.x, t.y, {
         storeId,
         indoorsCapacity,
-        storeType
-      });
-
-      store.on(STORE_EVENTS.READY, ({ npc }) => {
-        store.acceptInvite(npc);
-        store.moveNpcIndoors(npc).catch(() => {
-          store._onSpotFreed?.();
-        });
+        storeType,
+        MaxQueue: 2000
       });
 
       this.stores[storeId] = store;
     }
 
     // --- TABLES ---
+    // Lets temporarily make it so it adds only one table to each store, for testing purposes. We can later add more tables per store if we want.
+    
     const tableObjects = map.getObjectLayer('tables')?.objects || [];
     for (const obj of tableObjects) {
       const t = this.GRID.objectToTile(obj.x, obj.y);
@@ -224,7 +225,7 @@ export const mainScene = {
     this.npcs = {};
 
     if (spawnerObjects.length > 0) {
-      const maxNPCs = 200;
+      const maxNPCs = 100;
 
       const wanderFactory = (scene, npc, GRID) =>
         new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
@@ -244,8 +245,6 @@ export const mainScene = {
           queueLoiterStepMinMs: 700,
           queueLoiterStepMaxMs: 1800,
           loiterMaxRadiusSearch: 25,
-          eatMinMs: 4000,
-          eatMaxMs: 12000,
           postEatWanderMinMs: 5000,
           postEatWanderMaxMs: 12000,
           wanderFactory
@@ -354,6 +353,28 @@ export const mainScene = {
         cam.scrollX += this._camDrag.vx;
         cam.scrollY += this._camDrag.vy;
       }
+    }
+
+    const heat = window.__HEAT__;
+    if (heat && this.mapRef) {
+      const mapW = this.mapRef.width;   // tiles
+      const mapH = this.mapRef.height;  // tiles
+
+      const points = [];
+
+      for (const npc of Object.values(this.npcs)) {
+        // IMPORTANT: your tile coords might be 1-based depending on GRID impl.
+        // If npc.tileX is 1..mapW, use (tileX-1). If it's 0..mapW-1, don't.
+        const tx0 = npc.tileX - 1; // <- change to `npc.tileX` if you’re 0-based
+        const ty0 = npc.tileY - 1; // <- change to `npc.tileY` if you’re 0-based
+
+        const u = (tx0 + 0.5) / mapW;  // 0..1
+        const v = (ty0 + 0.5) / mapH;  // 0..1
+
+        points.push({ u, v });
+      }
+
+      heat.drawNormalizedPoints(points);
     }
   }
 };

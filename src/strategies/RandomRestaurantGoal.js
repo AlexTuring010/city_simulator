@@ -1,5 +1,18 @@
+// src/sim/strategies/RandomRestaurantGoal.js
+//
+// Updated:
+// - acquireTarget(npc, { excludeStoreIds = [] } = {}) signature
+// - Avoids stores whose storeId is in excludeStoreIds
+//
+// NOTE:
+// This strategy STILL does its own movement (goToTile + wait for ARRIVED/STUCK),
+// matching your current design.
+// If later you want *fully scalable*, you can make acquireTarget return a store
+// without moving the NPC, and let the controller handle movement. But for now
+// this is the minimal change you asked for.
+
 import { NPC_EVENTS } from '../sim/npc/NPCEvents.js';
-import { findClosestFreeTile } from '../pathfinding/findPath.js'; 
+import { findClosestFreeTile } from '../pathfinding/findPath.js';
 
 export class RandomRestaurantGoal {
   constructor(scene, GRID, storesById, {
@@ -7,7 +20,7 @@ export class RandomRestaurantGoal {
     stepMinWaitMs = 250,
     stepMaxWaitMs = 800,
     storeTypes = ['left_restaurant', 'right_restaurant'],
-    closestTileMaxRadius = 50,        // maps to your helper’s maxRadius
+    closestTileMaxRadius = 50,
     allowSame = true
   } = {}) {
     this.scene = scene;
@@ -23,9 +36,21 @@ export class RandomRestaurantGoal {
     this.allowSame = allowSame;
   }
 
-  acquireTarget(npc) {
+  /**
+   * Try to route the NPC near a random restaurant entry.
+   * excludeStoreIds: array of storeId strings to skip (visited / recently failed).
+   *
+   * Returns Promise resolving to:
+   *  - { store } on success
+   *  - null on failure/exhausted
+   */
+  acquireTarget(npc, { excludeStoreIds = [] } = {}) {
+    const exclude = new Set(excludeStoreIds);
+
     const stores = Object.values(this.storesById || {})
-      .filter(s => this.storeTypes.has(s.storeType));
+      .filter(s => this.storeTypes.has(s.storeType))
+      .filter(s => !exclude.has(s.storeId));
+
     if (!stores.length) return Promise.resolve(null);
 
     const pickRandomStore = () =>
@@ -60,12 +85,13 @@ export class RandomRestaurantGoal {
 
         // If we can’t find any free tile near this store, try another quickly
         if (!goal) {
-          console.warn(`No free tile found near store entry (${e.x}, ${e.y}) for NPC ${npc.id}; picking another store...`);
+          // Avoid spamming logs in big sims; comment out if noisy
+          // console.warn(`No free tile found near store entry (${e.x}, ${e.y}) for NPC ${npc.id}; picking another store...`);
           timer = this.scene.time.delayedCall(0, goToRandomRestaurant);
           return;
         }
 
-        // For defense purposes, if we are inside a blocked tile, lets move outside it instead of giving up
+        // If we are inside a blocked tile, try stepping out first
         const outsideGoal = findClosestFreeTile(this.GRID, npc.tileX, npc.tileY);
         if (outsideGoal && (outsideGoal.x !== npc.tileX || outsideGoal.y !== npc.tileY)) {
           npc.goToTile(outsideGoal.x, outsideGoal.y, {
@@ -74,6 +100,7 @@ export class RandomRestaurantGoal {
         }
 
         npc.goToTile(goal.x, goal.y, {
+          allowWeakCollision: false,
         });
       };
 

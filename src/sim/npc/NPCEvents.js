@@ -8,7 +8,8 @@ export const NPC_EVENTS = Object.freeze({
   ARRIVED: 'arrived',
   STUCK: 'stuck',
   STOPPED: 'stopped',
-  WAIT_DONE: 'waitDone'
+  WAIT_DONE: 'waitDone', 
+  CALLED_TO_ENTER: 'called_to_enter'
 });
 
 export const NPC_STUCK_REASONS = Object.freeze({

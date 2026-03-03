@@ -5,27 +5,82 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>KnowsWhere - Isometric Test</title>
 
-  <!-- Phaser (global Phaser variable) -->
   <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser-arcade-physics.min.js"></script>
 
+  <!-- Leaflet -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
   <style>
-    body {
+    html, body {
+      height: 100%;
       margin: 0;
-      background-color: #222;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      height: 100vh;
+      background: #222;
+      overflow: hidden;
     }
-    canvas { box-shadow: 0 0 20px rgba(0,0,0,0.5); }
+
+    .layout {
+      /* half the screen height */
+      height: 50vh;
+
+      /* space from page edges */
+      margin: 48px;
+
+      /* center the row vertically a bit (optional) */
+      /* you can remove this if you want it at the top */
+      margin-top: 80px;
+
+      display: flex;
+      gap: 48px; /* bigger gap between game & map */
+      box-sizing: border-box;
+    }
+
+    #game-container,
+    #map-wrap {
+      flex: 1;
+      position: relative;
+      height: 100%;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #111;
+      box-shadow: 0 0 20px rgba(0,0,0,0.5);
+    }
+
+    /* Padding INSIDE the map panel so map doesn't touch edges */
+    #map-wrap {
+      padding: 32px;
+      box-sizing: border-box;
+    }
+
+    /* Map and canvas must occupy the same inner box */
+    #map,
+    #heat-canvas {
+      position: absolute;
+      top: 32px;
+      right: 32px;
+      bottom: 32px;
+      left: 32px;
+    }
+
+    /* Ensure canvas is above map */
+    #map { z-index: 1; }
+    #heat-canvas { z-index: 2; pointer-events: none; }
   </style>
 </head>
 
 <body>
-  <!-- Your game mounts here (Phaser uses parent id from config) -->
-  <div id="game-container"></div>
+  <div class="layout">
+    <div id="game-container"></div>
 
-  <!-- Load the entry point as a module -->
+    <div id="map-wrap">
+      <div id="map"></div>
+      <canvas id="heat-canvas"></canvas>
+    </div>
+  </div>
+
   <script type="module" src="src/game.js"></script>
 </body>
 </html>

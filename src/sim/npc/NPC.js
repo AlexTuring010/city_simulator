@@ -171,6 +171,26 @@ export class NPC {
     if (this.arrowG) this.arrowG.setActive(false);
   }
 
+  putOutside({ containerId = null, reason = 'TAKEN_OUT' } = {}) {
+    // If already outside, do nothing
+    if (!this.isInside) return;
+
+    this.isInside = false;
+    this.insideData = { containerId, reason };
+
+    if (this.sprite) {
+      this.sprite.setVisible(true);
+      this.sprite.setActive(true);
+    }
+    if (this.shadow) {
+      this.shadow.setVisible(true);
+      this.shadow.setActive(true);
+    }
+
+    for (const g of this.pathSegments) g.setActive(true);
+    if (this.arrowG) this.arrowG.setActive(true);
+  }
+
   takeOutToTile(tileX, tileY, { containerId = null } = {}) {
     // Update logical tile + world position
     this.tileX = tileX;

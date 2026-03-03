@@ -1,30 +1,30 @@
-import { findClosestFreeTile } from '../../pathfinding/findPath.js';
-import { NPC_EVENTS } from '../../sim/npc/NPCEvents.js';
+// src/sim/store/Store.js (simple, log-driven)
+//
+// RULES (as requested):
+// - Store has indoor capacity + outside tables (2 seats each).
+// - On requestEnter(npc):
+//   - Randomly choose INDOORS vs TABLE, subject to availability rules.
+//   - Immediately log assignment (indoors-- or table seat taken).
+//   - Return ok + coordinates + table/seat if table.
+// - If no space: queue (bounded).
+// - When space becomes available (npcDoneEating):
+//   - Pop from queue and assign immediately.
+//   - Emit npc event: NPC_EVENTS.CALLED_TO_ENTER with the payload.
+// - Controller may remove an npc from queue at any time.
+//
+// IMPORTANT:
+// - We do NOT call table.seatNpc here.
+// - We do NOT inspect table internal state.
+// - Store logs are source of truth.
 
-export const STORE_EVENTS = {
-  READY: 'READY',                 // invited to enter (includes inviteId)
-  INVITE_EXPIRED: 'INVITE_EXPIRED',
-  INVITE_ACCEPTED: 'INVITE_ACCEPTED',
-  INVITE_REJECTED: 'INVITE_REJECTED',
+import { NPC_EVENTS } from '../npc/NPCEvents.js';
 
-  QUEUED: 'QUEUED',
-  DEQUEUED: 'DEQUEUED',
-  ENTERED: 'ENTERED',
-  LEFT: 'LEFT',
-  TABLE_SEATED: 'TABLE_SEATED',
-  TABLE_LEFT: 'TABLE_LEFT',
-  FULL: 'FULL'
-};
-
-// --- You must define how store_type maps to sprite rows + collision footprint.
-// Assumption: stores_160x138.png has 2 columns per type: [doorClosed, doorOpen]
-// Row i => frames: i*2 (closed), i*2+1 (open)
 const STORE_TYPE_CONFIG = {
   left_restaurant: {
     row: 0,
     footprint: { w: 4, h: 4, ox: 1, oy: 0 },
     insideTileOffset: { x: 1, y: 1 },
-    DepthOffset: 18
+    DepthOffset: 32
   },
   right_restaurant: {
     row: 1,
@@ -35,98 +35,92 @@ const STORE_TYPE_CONFIG = {
   }
 };
 
+// Tiny O(1) amortized queue (lazy deletion supported)
+class Deque {
+  constructor() { this._a = []; this._h = 0; }
+  get length() { return this._a.length - this._h; }
+  push(v) { this._a.push(v); }
+  shift() {
+    if (this._h >= this._a.length) return undefined;
+    const v = this._a[this._h++];
+    if (this._h > 1024 && this._h * 2 > this._a.length) {
+      this._a = this._a.slice(this._h);
+      this._h = 0;
+    }
+    return v;
+  }
+  clear() { this._a.length = 0; this._h = 0; }
+}
+
 export class Store {
-  constructor(scene, GRID, tileX, tileY, { storeId, indoorsCapacity = 0, storeType }) {
+  constructor(scene, GRID, tileX, tileY, {
+    storeId,
+    indoorsCapacity = 0,
+    storeType = 'left_restaurant',
+    maxQueue = null
+  } = {}) {
     this.scene = scene;
     this.GRID = GRID;
 
     this.storeId = storeId;
-
-    // IMPORTANT:
-    // indoorsCapacity only caps NPCs that occupy "indoors spots".
-    // Store queue / invites are STORE-WIDE: tables + indoors.
-    this.indoorsCapacity = indoorsCapacity;
-
     this.storeType = storeType;
 
     this.tileX = tileX;
     this.tileY = tileY;
 
-    this.events = new Phaser.Events.EventEmitter();
-
-    this.tables = [];
-
-    // --- occupancy / queue state ---
-    this.indoors = new Set();   // NPCs currently inside (after putInside)
-    this.queue = [];            // FIFO waiting to be invited into ANY available spot
-
-    // --- Option B: multiple outstanding invites + reservation ---
-    // activeInvites: npc -> { inviteId, timer, reservation }
-    this.activeInvites = new Map();
-
-    // reserved: npc -> reservation
-    // reservation = { kind: 'TABLE', table, claimIdx } OR { kind: 'INDOORS' }
-    this.reserved = new Map();
-
-    this._inviteSeq = 0;
-
+    // --- visuals config (KEEP) ---
     this._typeCfg = STORE_TYPE_CONFIG[storeType] ?? null;
 
-    // Sprite (store building)
-    this.X = tileX + this._typeCfg.footprint.ox
-    this.Y = tileY + this._typeCfg.footprint.oy;
+    this.X = tileX + (this._typeCfg?.footprint?.ox ?? 0);
+    this.Y = tileY + (this._typeCfg?.footprint?.oy ?? 0);
+
     const p = GRID.tileToWorld(this.X, this.Y);
-    const frame = this._frameClosed();
-
-    this.sprite = scene.add.sprite(p.x, p.y, 'stores', frame);
+    this.sprite = scene.add.sprite(p.x, p.y, 'stores', this._frameClosed());
     this.sprite.setOrigin(0.5, 1);
-    this.sprite.setDepth(p.y - this._typeCfg.DepthOffset);
+    this.sprite.setDepth(p.y - (this._typeCfg?.DepthOffset ?? 0));
 
-    // stamp collisions once
     this._stampCollisionOnce();
+
+    // --- door timer ---
+    this._doorTimer = null;
+
+    // --- capacity logs (source of truth) ---
+    this.indoorsCapacity = Math.max(0, indoorsCapacity);
+    this._freeIndoor = this.indoorsCapacity;
+
+    // --- tables (outside) ---
+    // We keep references, but never inspect table.seats for availability.
+    this.tables = [];                 // array<Table>
+    this._tableById = new Map();      // tableId -> Table
+    this._tableSeats = new Map();     // tableId -> [npcId|null, npcId|null]
+
+    // npcId -> { kind:'INDOORS' } OR { kind:'TABLE', tableId, seatIdx }
+    this._npcPlacement = new Map();
+
+    // --- queue ---
+    // Queue stores NPC refs so we can emit events directly later.
+    this.queue = new Deque();         // npc refs
+    this.queued = new Set();          // npcId membership (lazy deletion)
+    this._autoMaxQueue = (maxQueue == null);
+    this.maxQueue = maxQueue ?? 4;
+    this._recomputeDefaultMaxQueue();
   }
 
-  destroy() {
-    this._clearAllInvites();
-    this.events.removeAllListeners();
-    if (this.sprite) this.sprite.destroy();
-    this.sprite = null;
-    for (const t of this.tables) t.destroy?.();
-    this.tables.length = 0;
-  }
-
-  on(event, fn, ctx) { this.events.on(event, fn, ctx); return this; }
-  off(event, fn, ctx) { this.events.off(event, fn, ctx); return this; }
-
-  // ---------- config helpers ----------
+  // ---------------- visuals/collision ----------------
   _frameClosed() {
     const row = this._typeCfg?.row ?? 0;
     return row * 2 + 0;
   }
+
   _frameOpen() {
     const row = this._typeCfg?.row ?? 0;
     return row * 2 + 1;
   }
 
-  get entryTile() {
-    return { x: this.tileX, y: this.tileY };
-  }
-
-  // ---------- stats ----------
-  get indoorsCount() { return this.indoors.size; }
-  get queueCount() { return this.queue.length; }
-  get tablesCount() { return this.tables.length; }
-  get tablesPeopleCount() {
-    let n = 0;
-    for (const t of this.tables) n += (t.occupiedCount ?? 0);
-    return n;
-  }
-
-  // ---------- collisions ----------
   _stampCollisionOnce() {
     const fp = this._typeCfg?.footprint;
     if (!fp) return;
-    if (typeof this.GRID.setBlocked !== 'function') return; // fail-safe
+    if (typeof this.GRID.setBlocked !== 'function') return;
 
     for (let dy = 0; dy < fp.h; dy++) {
       for (let dx = 0; dx < fp.w; dx++) {
@@ -137,463 +131,320 @@ export class Store {
     }
   }
 
-  // ---------- door ----------
   openDoor() { this.sprite?.setFrame?.(this._frameOpen()); }
   closeDoor() { this.sprite?.setFrame?.(this._frameClosed()); }
 
-  // ---------- tables ----------
-  addTable(table) { this.tables.push(table); }
-  findAvailableTable() { return this.tables.find(t => t.hasFreeSeat?.()) ?? null; }
+  pulseDoor(ms = 120) {
+    this.openDoor();
 
-  // ---------- spot accounting (STORE-WIDE capacity) ----------
-  _countReserved(kind) {
-    let n = 0;
-    for (const r of this.reserved.values()) if (r?.kind === kind) n++;
-    return n;
-  }
-
-  _countInvited(kind) {
-    let n = 0;
-    for (const e of this.activeInvites.values()) if (e?.reservation?.kind === kind) n++;
-    return n;
-  }
-
-  _getFreeTableSeatCount() {
-    // Try exact per-seat counts if the Table exposes them
-    let total = 0;
-
-    for (const t of this.tables) {
-      if (!t) continue;
-
-      // Best: table.getFreeSeatCount()
-      if (typeof t.getFreeSeatCount === 'function') {
-        total += Math.max(0, t.getFreeSeatCount());
-        continue;
-      }
-
-      // Next best: seatCount - occupiedCount - claimedCount
-      const seatCount = t.seatCount ?? t.capacity ?? null;
-      const occupied = t.occupiedCount ?? 0;
-      const claimed = t.claimedCount ?? 0;
-
-      if (typeof seatCount === 'number') {
-        total += Math.max(0, seatCount - occupied - claimed);
-        continue;
-      }
-
-      // Fallback: boolean hasFreeSeat() => count as 1 "spot" per table
-      if (typeof t.hasFreeSeat === 'function') {
-        total += t.hasFreeSeat() ? 1 : 0;
-      }
+    if (this._doorTimer) {
+      this._doorTimer.remove(false);
+      this._doorTimer = null;
     }
 
-    return total;
-  }
-
-  // Indoor spots available for NEW invites AFTER accounting for indoors + reserved + active invites
-  get freeIndoorSpots() {
-    const used = this.indoors.size + this._countReserved('INDOORS') + this._countInvited('INDOORS');
-    return Math.max(0, this.indoorsCapacity - used);
-  }
-
-  // Table spots available for NEW invites AFTER accounting for reserved + active invites
-  get freeTableSpots() {
-    const freeSeats = this._getFreeTableSeatCount();
-    const held = this._countReserved('TABLE') + this._countInvited('TABLE');
-    return Math.max(0, freeSeats - held);
-  }
-
-  // STORE-WIDE spots: if either tables OR indoors has room, we can invite from the store queue
-  get freeStoreSpots() {
-    return this.freeTableSpots + this.freeIndoorSpots;
-  }
-
-  // ---------- reservations ----------
-  _tryReserveSpotForNpc(npc) {
-    // Prefer TABLE first (outdoor/any table counts as store capacity)
-    for (const t of this.tables) {
-      const idx = t?.claimSeat?.(npc);
-      if (idx >= 0) {
-        return { kind: 'TABLE', table: t, claimIdx: idx };
-      }
-    }
-
-    // Otherwise reserve INDOORS if available
-    if (this.freeIndoorSpots > 0) return { kind: 'INDOORS' };
-
-    return null;
-  }
-
-  _releaseReservation(npc, reservation) {
-    if (!reservation) return;
-    if (reservation.kind === 'TABLE') {
-      reservation.table?.releaseClaim?.(npc);
-    }
-  }
-
-  // ---------- NEW: nearest-free-tile helper ----------
-  _goToNearestFreeTile(npc, nearX, nearY, {
-    // These keys are passed through; adjust to your findClosestFreeTile signature
-    findOpts = { maxRadius: 8 },
-    pathOpts = {}
-  } = {}) {
-    const t = findClosestFreeTile(this.GRID, nearX, nearY, { ...findOpts });
-    const target = t ?? this.entryTile;
-
-    npc.goToTile(target.x, target.y, {
-      allowWeakCollision: true,
-      showIndicator: false,
-      ...pathOpts
+    if (!this.scene?.time?.delayedCall) return;
+    this._doorTimer = this.scene.time.delayedCall(ms, () => {
+      this._doorTimer = null;
+      this.closeDoor();
     });
-
-    return target;
   }
 
-  // ---------- Option B: invite filling logic (STORE-WIDE) ----------
-  _fillInvites({ graceMs = 1500 } = {}) {
-    // Invite up to current freeStoreSpots (multiple at once)
-    while (this.freeStoreSpots > 0) {
-      const next = this.queue.shift();
-      if (!next) break;
-
-      // If they somehow got reserved/indoors/invited already, skip
-      if (this.indoors.has(next) || this.reserved.has(next) || this.activeInvites.has(next)) continue;
-
-      const reservation = this._tryReserveSpotForNpc(next);
-      if (!reservation) break;
-
-      this._inviteNpc(next, reservation, graceMs);
-    }
-  }
-
-  _inviteNpc(npc, reservation, graceMs) {
-    const inviteId = (++this._inviteSeq) | 0;
-
-    const timer = this.scene.time.delayedCall(graceMs, () => {
-      const cur = this.activeInvites.get(npc);
-      if (!cur || cur.inviteId !== inviteId) return;
-
-      this.activeInvites.delete(npc);
-
-      // Release held spot if invite expires
-      this._releaseReservation(npc, cur.reservation);
-
-      this.events.emit(STORE_EVENTS.INVITE_EXPIRED, { store: this, npc, inviteId });
-      this._fillInvites({ graceMs });
-    });
-
-    this.activeInvites.set(npc, { inviteId, timer, reservation });
-
-    // READY still emitted (good for other listeners / UI)
-    this.events.emit(STORE_EVENTS.READY, { store: this, npc, inviteId });
-
-    return inviteId;
-  }
-
-  _clearInviteForNpc(npc) {
-    const entry = this.activeInvites.get(npc);
-    if (!entry) return;
-
-    entry?.timer?.remove?.(false);
-
-    // Release held spot (table claim) if canceling invite
-    this._releaseReservation(npc, entry.reservation);
-
-    this.activeInvites.delete(npc);
-  }
-
-  _clearAllInvites() {
-    for (const [, entry] of this.activeInvites.entries()) {
-      entry?.timer?.remove?.(false);
-      this._releaseReservation(null, entry?.reservation);
-    }
-    this.activeInvites.clear();
-
-    // Release any reservations (especially table claims)
-    for (const [npc, r] of this.reserved.entries()) {
-      this._releaseReservation(npc, r);
-    }
-    this.reserved.clear();
-  }
-
-  // ---------- queue handshake ----------
-  requestEnter(npc, { graceMs = 1500 } = {}) {
-    if (this.indoors.has(npc)) return { ok: true, status: 'ALREADY_INSIDE' };
-    if (this.reserved.has(npc)) return { ok: true, status: 'ALREADY_RESERVED' };
-    if (this.activeInvites.has(npc)) return { ok: true, status: 'ALREADY_INVITED' };
-
-    // STORE-WIDE: if ANY spot available (table or indoors), invite now
-    if (this.freeStoreSpots > 0) {
-      const reservation = this._tryReserveSpotForNpc(npc);
-      if (reservation) {
-        const inviteId = this._inviteNpc(npc, reservation, graceMs);
-        return { ok: true, status: 'INVITED', inviteId };
-      }
+  destroy() {
+    if (this._doorTimer) {
+      this._doorTimer.remove(false);
+      this._doorTimer = null;
     }
 
-    if (this.queue.includes(npc)) return { ok: true, status: 'ALREADY_QUEUED' };
+    if (this.sprite) {
+      this.sprite.destroy();
+      this.sprite = null;
+    }
+
+    this.queue.clear();
+    this.queued.clear();
+
+    this._npcPlacement.clear();
+    this._tableSeats.clear();
+    this._tableById.clear();
+    this.tables.length = 0;
+  }
+
+  // ---------------- basic tiles ----------------
+  get entryTile() {
+    return { x: this.tileX, y: this.tileY };
+  }
+
+  get insideTile() {
+    const off = this._typeCfg?.insideTileOffset ?? { x: 0, y: 0 };
+    return { x: this.tileX + off.x, y: this.tileY + off.y };
+  }
+
+  // ---------------- capacity helpers ----------------
+  getServiceCapacity() {
+    return this.indoorsCapacity + this.tables.length * 2;
+  }
+
+  _recomputeDefaultMaxQueue() {
+    if (!this._autoMaxQueue) return;
+    const cap = this.getServiceCapacity();
+    this.maxQueue = Math.max(4, Math.ceil(cap / 2));
+  }
+
+  // ---------------- tables ----------------
+  addTable(table) {
+    // Ensure stable id
+    const tid = table.id ?? `table_${table.tileX}_${table.tileY}`;
+    table.id = tid;
+
+    this.tables.push(table);
+    this._tableById.set(tid, table);
+
+    // Store-owned seats: 2 per table
+    if (!this._tableSeats.has(tid)) this._tableSeats.set(tid, [null, null]);
+
+    this._recomputeDefaultMaxQueue();
+  }
+
+  // ---------------- queue management ----------------
+  removeFromQueue(npc) {
+    const npcId = npc?.id;
+    if (npcId == null) return false;
+    return this.queued.delete(npcId); // lazy deletion
+  }
+
+  // ---------------- main API ----------------
+  requestEnter(npc) {
+    const npcId = npc?.id;
+    if (npcId == null) return { ok: false, status: 'BAD_NPC_ID' };
+
+    // Idempotent: if already assigned, return same assignment.
+    const existing = this._npcPlacement.get(npcId);
+    if (existing) {
+      return { ok: true, status: 'ALREADY_ASSIGNED', ...this._buildPayload(npcId, existing) };
+    }
+
+    // Already queued?
+    if (this.queued.has(npcId)) {
+      return { ok: false, status: 'ALREADY_QUEUED' };
+    }
+
+    // Try assign immediately
+    const placement = this._assignNow(npcId);
+    if (placement) {
+      return { ok: true, status: 'ASSIGNED', ...this._buildPayload(npcId, placement) };
+    }
+
+    // No space -> queue (bounded)
+    if (this.queued.size >= this.maxQueue) {
+      return { ok: false, status: 'QUEUE_FULL' };
+    }
+
+    this.queued.add(npcId);
     this.queue.push(npc);
-
-    this.events.emit(STORE_EVENTS.QUEUED, { store: this, npc });
-    this.events.emit(STORE_EVENTS.FULL, { store: this, npc });
 
     return { ok: false, status: 'QUEUED' };
   }
 
-  leaveQueue(npc) {
-    let changed = false;
+  npcDoneEating(npcOrId) {
+    const npcId = (typeof npcOrId === 'object') ? npcOrId?.id : npcOrId;
+    if (npcId == null) return false;
 
-    const idx = this.queue.indexOf(npc);
-    if (idx >= 0) {
-      this.queue.splice(idx, 1);
-      this.events.emit(STORE_EVENTS.DEQUEUED, { store: this, npc });
-      changed = true;
-    }
+    const placement = this._npcPlacement.get(npcId);
+    if (!placement) return false;
 
-    if (this.activeInvites.has(npc)) {
-      this._clearInviteForNpc(npc);
-      changed = true;
-    }
+    this._releasePlacement(npcId, placement);
 
-    if (this.reserved.has(npc)) {
-      const r = this.reserved.get(npc);
-      this.reserved.delete(npc);
-      this._releaseReservation(npc, r);
-      changed = true;
-    }
-
-    if (changed) this._fillInvites();
-    return changed;
-  }
-
-  /**
-   * Must echo inviteId from READY to be accepted.
-   * Late responses are ignored safely (token mismatch).
-   */
-  acceptInvite(npc, inviteId) {
-    const entry = this.activeInvites.get(npc);
-    if (!entry) {
-      this.events.emit(STORE_EVENTS.INVITE_REJECTED, { store: this, npc, inviteId, reason: 'NO_ACTIVE_INVITE' });
-      return false;
-    }
-    if (entry.inviteId !== inviteId) {
-      this.events.emit(STORE_EVENTS.INVITE_REJECTED, { store: this, npc, inviteId, reason: 'INVITE_ID_MISMATCH' });
-      return false;
-    }
-
-    // Cancel invite timer and reserve the held spot
-    entry?.timer?.remove?.(false);
-    this.activeInvites.delete(npc);
-
-    this.reserved.set(npc, entry.reservation);
-
-    this.events.emit(STORE_EVENTS.INVITE_ACCEPTED, { store: this, npc, inviteId });
-
-    // Accepting changes counts; we may still have other free slots to invite more
-    this._fillInvites();
+    // now that space exists, call from queue immediately
+    this._drainQueue();
 
     return true;
   }
 
-  _onSpotFreed() {
-    this._fillInvites();
+  // ---------------- internal: assignment policy ----------------
+  _assignNow(npcId) {
+    // Rules:
+    // - Random choose INDOORS vs TABLE
+    // - If no indoors space => TABLE (if any)
+    // - If no tables => INDOORS (if any)
+    // - If neither => null
+
+    const indoorAvailable = this._freeIndoor > 0;
+    const tableSeat = this._pickRandomFreeTableSeat(); // { tableId, seatIdx } or null
+    const tableAvailable = !!tableSeat;
+
+    if (!indoorAvailable && !tableAvailable) return null;
+
+    if (!indoorAvailable && tableAvailable) return this._takeTableSeat(npcId, tableSeat);
+    if (indoorAvailable && !tableAvailable) return this._takeIndoors(npcId);
+
+    // both available: random
+    return (Math.random() < 0.5)
+      ? this._takeIndoors(npcId)
+      : this._takeTableSeat(npcId, tableSeat);
   }
 
-  // ---------- flows ----------
-  /**
-   * Requires reservation (INDOORS) to prevent overbooking.
-   * Promise resolves when putInside is done, rejects if not reserved or stuck.
-   */
-  moveNpcIndoors(npc) {
-    const entry = this.entryTile;
-
-    const r = this.reserved.get(npc);
-    const isReservedIndoors = r?.kind === 'INDOORS';
-
-    if (!isReservedIndoors && !this.indoors.has(npc)) {
-      return Promise.reject({ reason: 'NOT_RESERVED_INDOORS' });
-    }
-
-    return new Promise((resolve, reject) => {
-      const DOOR_OPEN_MS = 150;   // tweak
-      const DOOR_CLOSE_MS = 150;
-
-      const onArrived = () => {
-        cleanup();
-
-        this.openDoor();
-
-        this.scene.time.delayedCall(DOOR_OPEN_MS, () => {
-          npc.putInside?.({ containerId: `store:${this.storeId}`, reason: 'ENTER_STORE' });
-
-          // consume reservation -> indoors
-          this.reserved.delete(npc);
-          this.indoors.add(npc);
-
-          this.events.emit(STORE_EVENTS.ENTERED, { store: this, npc });
-
-          this.scene.time.delayedCall(DOOR_CLOSE_MS, () => {
-            this.closeDoor();
-            this._fillInvites();
-            resolve(true);
-          });
-        });
-      };
-
-      const onStuck = (data) => {
-        cleanup();
-
-        // release reservation so others can be invited
-        const r2 = this.reserved.get(npc);
-        if (r2) {
-          this.reserved.delete(npc);
-          this._releaseReservation(npc, r2);
-          this._fillInvites();
-        }
-
-        reject(data);
-      };
-
-      const cleanup = () => {
-        npc.off?.(NPC_EVENTS.ARRIVED, onArrived);
-        npc.off?.(NPC_EVENTS.STUCK, onStuck);
-      };
-
-      npc.on?.(NPC_EVENTS.ARRIVED, onArrived);
-      npc.on?.(NPC_EVENTS.STUCK, onStuck);
-
-      npc.goToTile(entry.x, entry.y, {
-        allowBlockedGoal: true,
-      });
-    });
+  _takeIndoors(npcId) {
+    this._freeIndoor -= 1;
+    const placement = { kind: 'INDOORS' };
+    this._npcPlacement.set(npcId, placement);
+    return placement;
   }
 
-  /**
-   * STORE-WIDE: move NPC to whatever spot they reserved (TABLE or INDOORS).
-   * If TABLE: go to the table, commit the claim, optionally "sit" duration, then unseat.
-   * If INDOORS: uses moveNpcIndoors().
-   */
-  async moveNpcToReservedSpot(npc, { tableDurationMs = 2000 } = {}) {
-    const reservation = this.reserved.get(npc);
-    if (!reservation) throw { reason: 'NOT_RESERVED' };
+  _takeTableSeat(npcId, { tableId, seatIdx }) {
+    const seats = this._tableSeats.get(tableId);
+    if (!seats) return null;
 
-    if (reservation.kind === 'INDOORS') {
-      await this.moveNpcIndoors(npc);
-      return { ok: true, kind: 'INDOORS' };
+    // Must be free (it should be, because we picked from logs)
+    if (seats[seatIdx] != null) return null;
+
+    seats[seatIdx] = npcId;
+    this._tableSeats.set(tableId, seats);
+
+    const placement = { kind: 'TABLE', tableId, seatIdx };
+    this._npcPlacement.set(npcId, placement);
+    return placement;
+  }
+
+  _pickRandomFreeTableSeat() {
+    if (!this.tables.length) return null;
+
+    // Build candidates based ONLY on store logs
+    const candidates = [];
+    for (const t of this.tables) {
+      const tid = t.id;
+      const seats = this._tableSeats.get(tid) ?? [null, null];
+
+      if (seats[0] == null) candidates.push({ tableId: tid, seatIdx: 0 });
+      if (seats[1] == null) candidates.push({ tableId: tid, seatIdx: 1 });
+
+      if (!this._tableSeats.has(tid)) this._tableSeats.set(tid, seats);
     }
 
-    // TABLE reservation
-    const table = reservation.table;
-    if (!table) {
-      this.reserved.delete(npc);
-      throw { reason: 'BAD_RESERVATION_TABLE' };
+    if (!candidates.length) return null;
+    return candidates[(Math.random() * candidates.length) | 0];
+  }
+
+  _releasePlacement(npcId, placement) {
+    this._npcPlacement.delete(npcId);
+
+    if (placement.kind === 'INDOORS') {
+      this._freeIndoor += 1;
+      return;
     }
 
-    try {
-      await this._goOnce(npc, table.tileX, table.tileY, {
-        allowWeakCollision: true,
-      });
+    if (placement.kind === 'TABLE') {
+      const seats = this._tableSeats.get(placement.tableId);
+      if (!seats) return;
 
-      const seatIdx = table.commitClaim?.(npc) ?? table.commitSeat?.(npc);
-      if (seatIdx < 0) {
-        // claim got lost; release and fail
-        throw { reason: 'CLAIM_LOST' };
+      if (seats[placement.seatIdx] === npcId) seats[placement.seatIdx] = null;
+      this._tableSeats.set(placement.tableId, seats);
+    }
+  }
+
+  // ---------------- internal: queue -> called_to_enter ----------------
+  _drainQueue() {
+    // Keep assigning while we have space and queue has members.
+    while (true) {
+      // If nobody queued, stop.
+      if (this.queued.size <= 0) return;
+
+      // If no space, stop.
+      const canAssign = this._canAssignAnything();
+      if (!canAssign) return;
+
+      const npc = this.queue.shift();
+      if (!npc) return;
+
+      const npcId = npc?.id;
+      if (npcId == null) continue;
+
+      // lazy deletion: controller removed them
+      if (!this.queued.has(npcId)) continue;
+
+      // If somehow already assigned, just unqueue them and continue.
+      if (this._npcPlacement.has(npcId)) {
+        this.queued.delete(npcId);
+        continue;
       }
 
-      // consume reservation now that we committed
-      this.reserved.delete(npc);
-
-      this.events.emit(STORE_EVENTS.TABLE_SEATED, { store: this, npc, table, seatIdx });
-
-      // Optional "dine"
-      if (tableDurationMs > 0) {
-        await this._delay(tableDurationMs);
-
-        table.unseatNpc?.(npc);
-        this.events.emit(STORE_EVENTS.TABLE_LEFT, { store: this, npc, table });
-
-        // NEW: walk away from table to nearest free tile
-        this._goToNearestFreeTile(npc, table.tileX, table.tileY, {
-          findOpts: { maxRadius: 8 },
-          pathOpts: { allowWeakCollision: true, allowBlockedStart:true }
-        });
+      const placement = this._assignNow(npcId);
+      if (!placement) {
+        // No space after all -> push back and stop.
+        this.queue.push(npc);
+        return;
       }
 
-      // freeing a table seat can invite more
-      this._onSpotFreed();
+      this.queued.delete(npcId);
 
-      return { ok: true, kind: 'TABLE', table, seatIdx };
-    } catch (err) {
-      // release reservation + claim on failure
-      const r2 = this.reserved.get(npc);
-      if (r2) {
-        this.reserved.delete(npc);
-        this._releaseReservation(npc, r2);
-      } else {
-        // If we already consumed reservation but failed later, still ensure claim released
-        table.releaseClaim?.(npc);
-      }
-
-      this._fillInvites();
-      throw err;
+      // Emit: called_to_enter (your rule: no handshake)
+      this._emitCalledToEnter(npc, placement);
     }
   }
 
-  releaseNpcFromIndoors(npc, { doorMs = 150 } = {}) {
-    if (!this.indoors.has(npc)) return false;
-
-    // Remove first so capacity frees immediately
-    this.indoors.delete(npc);
-
-    const entry = this.entryTile;
-
-    // Visually open the door long enough to be rendered
-    this.openDoor();
-
-    // Give the renderer a moment before popping them out
-    this.scene.time.delayedCall(doorMs, () => {
-      // Pop out of container to the door tile
-      npc.takeOutToTile?.(entry.x, entry.y, { containerId: `store:${this.storeId}` });
-
-      // Walk away so they don't stack on the entry
-      this._goToNearestFreeTile(npc, entry.x, entry.y, {
-        findOpts: { maxRadius: 8 },
-        pathOpts: { allowWeakCollision: true, allowBlockedStart: true }
-      });
-
-      this.events.emit(STORE_EVENTS.LEFT, { store: this, npc });
-
-      // Close door after a short moment so the open frame is visible
-      this.scene.time.delayedCall(doorMs, () => {
-        this.closeDoor();
-
-        // Leaving may allow more invites
-        this._onSpotFreed();
-      });
-    });
-
-    return true;
+  _canAssignAnything() {
+    if (this._freeIndoor > 0) return true;
+    for (const seats of this._tableSeats.values()) {
+      if (seats[0] == null || seats[1] == null) return true;
+    }
+    return false;
   }
 
-  // ---------- internal helpers ----------
-  _delay(ms) {
-    return new Promise(res => this.scene.time.delayedCall(ms, res));
+  _emitCalledToEnter(npc, placement) {
+    const payload = this._buildPayload(npc?.id, placement);
+
+    // Your NPC class uses npc.events.emit(...)
+    if (npc?.events && typeof npc.events.emit === 'function') {
+      npc.events.emit(NPC_EVENTS.CALLED_TO_ENTER, payload);
+      return;
+    }
+
+    // If you ever add npc.emit sugar, this supports it too.
+    if (typeof npc?.emit === 'function') {
+      npc.emit(NPC_EVENTS.CALLED_TO_ENTER, payload);
+      return;
+    }
+
+    console.warn('[Store] NPC has no emitter; cannot emit called_to_enter', npc, payload);
   }
 
-  _goOnce(npc, x, y, goOpts) {
-    return new Promise((resolve, reject) => {
-      const onArrived = () => { cleanup(); resolve(true); };
-      const onStuck = (data) => { cleanup(); reject(data); };
-
-      const cleanup = () => {
-        npc.off?.(NPC_EVENTS.ARRIVED, onArrived);
-        npc.off?.(NPC_EVENTS.STUCK, onStuck);
+  _buildPayload(npcId, placement) {
+    if (placement.kind === 'INDOORS') {
+      return {
+        storeId: this.storeId,
+        npcId,
+        kind: 'INDOORS',
+        targetTile: this.entryTile,    // controller moves here then putInside/openDoor
+        insideTile: this.insideTile    // optional (if you want to use it)
       };
+    }
 
-      npc.on?.(NPC_EVENTS.ARRIVED, onArrived);
-      npc.on?.(NPC_EVENTS.STUCK, onStuck);
+    // TABLE
+    const table = this._tableById.get(placement.tableId) ?? null;
+    const targetTile = table ? { x: table.tileX, y: table.tileY } : this.entryTile;
 
-      npc.goToTile(x, y, goOpts);
-    });
+    return {
+      storeId: this.storeId,
+      npcId,
+      kind: 'TABLE',
+      tableId: placement.tableId,
+      seatIdx: placement.seatIdx,
+      targetTile,
+      table // controller uses this to call table.seatNpc on ARRIVED
+    };
+  }
+
+  // optional debug
+  debugSnapshot() {
+    const tableOcc = {};
+    for (const [tid, seats] of this._tableSeats.entries()) tableOcc[tid] = seats.slice();
+
+    return {
+      storeId: this.storeId,
+      freeIndoor: this._freeIndoor,
+      queued: this.queued.size,
+      maxQueue: this.maxQueue,
+      placements: this._npcPlacement.size,
+      tableOcc
+    };
   }
 }
