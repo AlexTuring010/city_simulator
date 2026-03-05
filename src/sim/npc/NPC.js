@@ -50,6 +50,11 @@ export class NPC {
     this.targetNode = null;
     this.speed = 1;
 
+    // navfield-follow movement (no A*)
+    this._moveMode = 'PATH'; // 'PATH' | 'NAV'
+    this._navStore = null;   // Store reference while following nav
+    this._navStuckFrames = 0;
+
     this._waitTimer = null;
     this._goal = null; // {x,y} of the final destination (optional)
 
@@ -276,6 +281,10 @@ export class NPC {
     this.targetNode = null;
     this._goal = null;
 
+    this._moveMode = 'PATH';
+    this._navStore = null;
+    this._navStuckFrames = 0;
+
     this.pathCache = null;
     this.pathCacheIdx = 0;
     this.pathDirty = true;
@@ -417,6 +426,95 @@ export class NPC {
     return true;
   }
 
+    /**
+   * Follow a precomputed per-store navfield (store.nav) toward store.goalTile.
+   * This avoids A* entirely. Next step is O(1).
+   *
+   * Assumes:
+   * - store.nav.getDistance(x,y) returns: -1 unreachable, 0 at goal, >0 steps away
+   * - store.nav.getNextStep(x,y) returns next tile or null
+   */
+  goToStoreNav(
+    store,
+    {
+      showIndicator = false,
+      indicatorColor = 0x33ff77
+    } = {}
+  ) {
+    if (!store || !store.nav || !store.goalTile) return false;
+
+    // Apply per-goal indicator settings
+    this.showPathIndicator = !!showIndicator;
+    this.pathIndicatorColor = indicatorColor;
+    if (!this.showPathIndicator) this._hideIndicator();
+
+    // cancel any wait
+    if (this._waitTimer) {
+      this._waitTimer.remove(false);
+      this._waitTimer = null;
+    }
+
+    // If unreachable, fail fast
+    const d0 = store.nav.getDistance(this.tileX, this.tileY);
+    if (d0 < 0) {
+      this.events.emit(NPC_EVENTS.STUCK, {
+        reason: NPC_STUCK_REASONS.NO_PATH,
+        goalX: store.goalTile.x,
+        goalY: store.goalTile.y,
+        npcX: this.tileX,
+        npcY: this.tileY
+      });
+      return false;
+    }
+
+    // Already there
+    if (d0 === 0) return true;
+
+    // Switch to NAV mode
+    this._moveMode = 'NAV';
+    this._navStore = store;
+    this._navStuckFrames = 0;
+
+    // Clear any existing path mode
+    this.path = [];
+    this.targetNode = null;
+
+    // Keep goal metadata for ARRIVED event
+    this._goal = { x: store.goalTile.x, y: store.goalTile.y, storeId: store.storeId };
+
+    // Force indicator cache rebuild (path array not used; indicator will be "next step only")
+    this.pathCache = null;
+    this.pathCacheIdx = 0;
+    this.pathDirty = true;
+
+    if (this._indicatorState) {
+      this._indicatorState.lastIdx = -1;
+      this._indicatorState.lastCacheRef = null;
+    }
+
+    // Prime the first step
+    const next = store.nav.getNextStep(this.tileX, this.tileY);
+    if (!next) {
+      // If distance was >0 but no next, treat as stuck (data inconsistency)
+      this.events.emit(NPC_EVENTS.STUCK, {
+        reason: NPC_STUCK_REASONS.NO_PATH,
+        goalX: store.goalTile.x,
+        goalY: store.goalTile.y,
+        npcX: this.tileX,
+        npcY: this.tileY
+      });
+      return false;
+    }
+
+    this.targetNode = next;
+    this.state = 'MOVING';
+
+    this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+    this.events.emit(NPC_EVENTS.GOAL_SET, { goalX: store.goalTile.x, goalY: store.goalTile.y, storeId: store.storeId });
+
+    return true;
+  }
+
   isBusy() {
     return this.state === 'MOVING' || this.state === 'WAITING';
   }
@@ -463,6 +561,65 @@ export class NPC {
     // If "inside", we do nothing and don’t even touch depth/indicator
     if (this.isInside) return;
 
+    // If NAV-moving and targetNode is missing, compute next step now
+    if (this.state === 'MOVING' && !this.targetNode && this._moveMode === 'NAV' && this._navStore?.nav) {
+      const store = this._navStore;
+
+      const d = store.nav.getDistance(this.tileX, this.tileY);
+
+      if (d === 0) {
+        // Arrived
+        const arrivedGoal = this._goal;
+
+        this.targetNode = null;
+        this._goal = null;
+
+        this._moveMode = 'PATH';
+        this._navStore = null;
+        this._navStuckFrames = 0;
+
+        this.pathCache = null;
+        this.pathCacheIdx = 0;
+
+        if (this._indicatorState) {
+          this._indicatorState.lastIdx = -1;
+          this._indicatorState.lastCacheRef = null;
+        }
+
+        this.state = 'IDLE';
+        this.setIdleFacing();
+
+        this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+        this.events.emit(NPC_EVENTS.ARRIVED, { tileX: this.tileX, tileY: this.tileY, goal: arrivedGoal });
+        return;
+      }
+
+      const next = store.nav.getNextStep(this.tileX, this.tileY);
+
+      if (!next) {
+        // Could be temporarily jammed (NPCs are dynamic obstacles) or unreachable.
+        // We’ll emit STUCK if it persists for a few frames.
+        this._navStuckFrames++;
+        if (this._navStuckFrames >= 10) {
+          this._navStuckFrames = 0;
+          this.events.emit(NPC_EVENTS.STUCK, {
+            reason: NPC_STUCK_REASONS.NO_PATH,
+            goalX: store.goalTile?.x,
+            goalY: store.goalTile?.y,
+            npcX: this.tileX,
+            npcY: this.tileY
+          });
+        }
+
+        this._hideIndicator();
+        this._syncDepthAndShadow();
+        return;
+      }
+
+      this._navStuckFrames = 0;
+      this.targetNode = next;
+    }
+
     // Not moving -> hide indicator + keep depth correct
     if (this.state !== 'MOVING' || !this.targetNode) {
       this._hideIndicator();
@@ -483,33 +640,41 @@ export class NPC {
       this.tileX = this.targetNode.x;
       this.tileY = this.targetNode.y;
 
-      if (this.path.length > 0) {
-        this.targetNode = this.path.shift();
-      } else {
-        // arrived at final tile
-        const arrivedGoal = this._goal;
+      if (this._moveMode === 'PATH') {
+        if (this.path.length > 0) {
+          this.targetNode = this.path.shift();
+        } else {
+          // arrived at final tile (your existing code unchanged)
+          const arrivedGoal = this._goal;
 
-        this.targetNode = null;
-        this._goal = null;
+          this.targetNode = null;
+          this._goal = null;
 
-        this.pathCache = null;
-        this.pathCacheIdx = 0;
+          this.pathCache = null;
+          this.pathCacheIdx = 0;
 
-        // reset indicator draw state
-        if (this._indicatorState) {
-          this._indicatorState.lastIdx = -1;
-          this._indicatorState.lastCacheRef = null;
+          if (this._indicatorState) {
+            this._indicatorState.lastIdx = -1;
+            this._indicatorState.lastCacheRef = null;
+          }
+
+          this.state = 'IDLE';
+          this.setIdleFacing();
+
+          this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+          this.events.emit(NPC_EVENTS.ARRIVED, {
+            tileX: this.tileX,
+            tileY: this.tileY,
+            goal: arrivedGoal
+          });
         }
+      } else if (this._moveMode === 'NAV') {
+        // In NAV mode, we do not store a path array.
+        // Clear targetNode so top-of-update recomputes next step from navfield.
+        this.targetNode = null;
 
-        this.state = 'IDLE';
-        this.setIdleFacing();
-
-        this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
-        this.events.emit(NPC_EVENTS.ARRIVED, {
-          tileX: this.tileX,
-          tileY: this.tileY,
-          goal: arrivedGoal
-        });
+        // Mark indicator dirty so it redraws correctly (optional)
+        this.pathDirty = true;
       }
     } else {
       // move toward node

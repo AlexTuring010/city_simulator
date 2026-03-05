@@ -75,14 +75,25 @@ async function initGoogleMapAndHeatmap() {
   const map = new google.maps.Map(document.getElementById('map'), {
     center: { lat: 37.9838, lng: 23.7275 },
     zoom: 15,
-    mapTypeControl: false,
+
+    mapTypeId: "hybrid", // satellite + labels
+
+    // UI buttons
+    disableDefaultUI: true,
+    zoomControl: false,
     streetViewControl: false,
-    fullscreenControl: false
-    // If you want to "lock" the viewport so the mapping rectangle never changes:
-    // draggable: false,
-    // gestureHandling: "none",
-    // zoomControl: false,
-    // disableDefaultUI: true,
+    mapTypeControl: false,
+    fullscreenControl: false,
+
+    // Interaction lock
+    gestureHandling: "none",     // disables pan/zoom gestures
+    keyboardShortcuts: false,    // disables keyboard navigation
+    clickableIcons: false,       // optional: POI clicks
+
+    // optional extra hardening
+    disableDoubleClickZoom: true,
+    scrollwheel: false,
+    draggable: false
   });
 
   // Create heatmap

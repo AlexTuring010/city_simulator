@@ -576,4 +576,25 @@ export class Store {
       tableOcc
     };
   }
+
+  // ---------------- capacity setters ----------------
+  setIndoorsCapacity(newCapacity, { resetFree = true } = {}) {
+    const cap = Math.max(0, Number(newCapacity) || 0);
+
+    // How many are currently indoors?
+    const occupiedIndoors = (this.indoorsCapacity - this._freeIndoor);
+
+    this.indoorsCapacity = cap;
+
+    if (resetFree) {
+      // Keep current occupants, clamp free slots
+      this._freeIndoor = Math.max(0, cap - occupiedIndoors);
+    } else {
+      // If caller wants full control, just clamp existing free
+      this._freeIndoor = Math.min(this._freeIndoor, cap);
+    }
+
+    this._recomputeDefaultMaxQueue();
+    this._refreshCapacityLabel(true);
+  }
 }

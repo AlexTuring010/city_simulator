@@ -15,8 +15,11 @@ import { makeGridIso } from '../grid/gridIso.js';
 import { EatOutController } from '../sim/controllers/EatOutController.js';
 import { RandomWanderController } from '../sim/controllers/RandomWanderController.js';
 import { RandomRestaurantGoal } from '../strategies/RandomRestaurantGoal.js';
+import { NearestRestaurantGoal } from '../strategies/NearestRestaurantGoal.js';
 import { Store } from '../sim/store/Store.js';
 import { Table } from '../sim/store/Table.js';
+import { buildRestaurantNavFields } from '../pathfinding/buildStoreNavFields.js';
+import { assignAutoIndoorsCapacities } from '../sim/store/assignAutoCapacities.js';
 
 export const mainScene = {
   key: 'MainScene',
@@ -155,7 +158,7 @@ export const mainScene = {
       }
 
       const storeId = Number(props.store_id);
-      const indoorsCapacity = Number(props.indoors_capacity ?? 0);
+      const indoorsCapacity = 0; // will be auto-assigned later based on tables
       const storeType = String(props.store_type ?? 'left_restaurant');
 
       if (!Number.isFinite(storeId)) continue;
@@ -164,7 +167,6 @@ export const mainScene = {
         storeId,
         indoorsCapacity,
         storeType,
-        MaxQueue: 2000
       });
 
       this.stores[storeId] = store;
@@ -172,6 +174,7 @@ export const mainScene = {
 
     // --- TABLES ---
     const tableObjects = map.getObjectLayer('tables')?.objects || [];
+    this.tables = []; // flat list of all tables (for easy iteration); also linked from stores
     for (const obj of tableObjects) {
       const t = this.GRID.objectToTile(obj.x, obj.y);
 
@@ -189,9 +192,47 @@ export const mainScene = {
 
       const table = new Table(this, this.GRID, t.x, t.y, { belongsTo, frame });
 
+      this.tables.push(table);
+    
       const store = this.stores[belongsTo];
       if (store) store.addTable(table);
     }
+
+    const maxNPCs = 200;
+
+    assignAutoIndoorsCapacities(this.stores, maxNPCs, {
+      storeTypes: ['left_restaurant', 'right_restaurant'],
+      seatsPerTable: 2,
+
+      // cap policy:
+      // 10 tables => 20 seats => max extra is max(20, 20*1.0)=20 => cap 40 (prevents 80)
+      maxExtraAbs: 20,
+      maxExtraMult: 1.0
+    });
+
+    const restaurants = Object.values(this.stores).filter(s => s.storeType.includes('restaurant'));
+    restaurants.sort((a,b) => a.storeId - b.storeId);
+
+    console.warn("RESTAURANT SUMMARY:");
+    
+    console.table(restaurants.map(s => ({
+      id: s.storeId,
+      tables: (s.tables?.length ?? 0),
+      goal: s.goalTile ? `${s.goalTile.x},${s.goalTile.y}` : '',
+      indoorsCapacity: s.indoorsCapacity
+    })));
+
+    // --- Build per-restaurant nav fields AFTER tables (blocked tiles finalized) ---
+    const mapW = this.mapRef.width;   // tiles
+    const mapH = this.mapRef.height;  // tiles
+    
+
+    buildRestaurantNavFields(this.GRID, this.stores, mapW, mapH, {
+      storeTypes: ['left_restaurant', 'right_restaurant'],
+      closestTileMaxRadius: 50,
+      allowSame: true,
+      allowWeakCollision: false
+    });
 
     // --------------------------
     // NPC animations
@@ -213,8 +254,6 @@ export const mainScene = {
     this.npcs = {};
 
     if (spawnerObjects.length > 0) {
-      const maxNPCs = 200;
-
       const wanderFactory = (scene, npc, GRID) =>
         new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
 
@@ -225,7 +264,7 @@ export const mainScene = {
         const type = Math.random() < 0.5 ? 'type2' : 'type1';
         const npc = new NPC(this, this.GRID, t.x, t.y, { type });
 
-        const strategy = new RandomRestaurantGoal(this, this.GRID, this.stores);
+        const strategy = new NearestRestaurantGoal(this, this.GRID, this.stores);
 
         const eatCtrl = new EatOutController(this, npc, this.GRID, this.stores, strategy, {
           eatMode: 'auto',
@@ -247,6 +286,8 @@ export const mainScene = {
     // Simulator Camera Controls (improved)
     // --------------------------
     const cam = this.cameras.main;
+
+    cam.roundPixels = true;
 
     const PAD = 2000;
     cam.setBounds(
@@ -305,6 +346,10 @@ export const mainScene = {
       );
       if (newZoom !== oldZoom) cam.setZoom(newZoom);
     });
+
+    let width = this.GRID.tileToWorld(map.width + 1, map.height + 1).x + originX;
+    let height = this.GRID.tileToWorld(map.width + 1, map.height + 1).y + originY;
+    cam.centerOn((width / 2) + 50, (height / 2) + 100);
   },
 
   update(time, delta) {
