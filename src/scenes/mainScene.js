@@ -214,7 +214,7 @@ export const mainScene = {
     restaurants.sort((a,b) => a.storeId - b.storeId);
 
     console.warn("RESTAURANT SUMMARY:");
-    
+
     console.table(restaurants.map(s => ({
       id: s.storeId,
       tables: (s.tables?.length ?? 0),

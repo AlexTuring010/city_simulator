@@ -320,6 +320,46 @@ export class NPC {
     return true;
   }
 
+  stepToTile(goalX, goalY, { showIndicator = false, indicatorColor = 0x33ff77 } = {}) {
+    // must be adjacent
+    const dx = Math.abs(goalX - this.tileX);
+    const dy = Math.abs(goalY - this.tileY);
+    if (dx + dy !== 1) return false;
+
+    if (this.GRID.isBlocked(goalX, goalY)) {
+      this.events.emit(NPC_EVENTS.STUCK, { reason: NPC_STUCK_REASONS.GOAL_BLOCKED, goalX, goalY, npcX: this.tileX, npcY: this.tileY });
+      return false;
+    }
+
+    // same “setup moving” as goToTile but without findPath
+    this.showPathIndicator = !!showIndicator;
+    this.pathIndicatorColor = indicatorColor;
+    if (!this.showPathIndicator) this._hideIndicator();
+
+    if (this._waitTimer) { this._waitTimer.remove(false); this._waitTimer = null; }
+
+    this._moveMode = 'PATH'; // or a new 'STEP'
+    this._goal = { x: goalX, y: goalY };
+
+    this.path = [];             // no path
+    this.targetNode = { x: goalX, y: goalY };
+    this.state = 'MOVING';
+
+    this.pathCache = null;
+    this.pathCacheIdx = 0;
+    this.pathDirty = true;
+
+    if (this._indicatorState) {
+      this._indicatorState.lastIdx = -1;
+      this._indicatorState.lastCacheRef = null;
+    }
+
+    this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+    this.events.emit(NPC_EVENTS.GOAL_SET, { goalX, goalY });
+
+    return true;
+  }
+
   /**
    * Go to a tile.
    *
