@@ -20,6 +20,7 @@ import { Store } from '../sim/store/Store.js';
 import { Table } from '../sim/store/Table.js';
 import { buildRestaurantNavFields } from '../pathfinding/buildStoreNavFields.js';
 import { assignAutoIndoorsCapacities } from '../sim/store/assignAutoCapacities.js';
+import { EpisodeManager } from '../sim/episodes/EpisodeManager.js';
 
 export const mainScene = {
   key: 'MainScene',
@@ -50,6 +51,7 @@ export const mainScene = {
     // NPC spritesheets
     this.load.spritesheet('npc_sprite', 'assets/person_tiles.png', { frameWidth: 32, frameHeight: 32 });
     this.load.spritesheet('npc_sprite2', 'assets/person_tiles2.png', { frameWidth: 32, frameHeight: 32 });
+    this.load.spritesheet('npc_sprite3', 'assets/person_tiles3.png', { frameWidth: 32, frameHeight: 32 });
 
     // Store and table spritesheets
     this.load.spritesheet('stores', 'assets/stores_160x138.png', { frameWidth: 160, frameHeight: 138 });
@@ -63,6 +65,10 @@ export const mainScene = {
       throttleMs: 150, // tune: 80..300ms
       base1Tiles: true // your GRID comment suggests base-1 tile coords
     };
+
+    this._hudNpcEl = document.getElementById('hud-npcs');
+    this._hudLastMs = 0;
+    this._hudThrottleMs = 150;
 
     const map = this.make.tilemap({ key: 'map' });
     this.mapRef = map;
@@ -198,7 +204,7 @@ export const mainScene = {
       if (store) store.addTable(table);
     }
 
-    const maxNPCs = 200;
+    const maxNPCs = 2000;
 
     assignAutoIndoorsCapacities(this.stores, maxNPCs, {
       storeTypes: ['left_restaurant', 'right_restaurant'],
@@ -247,40 +253,31 @@ export const mainScene = {
     this.anims.create({ key: 'npc_walk_up2',    frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
     this.anims.create({ key: 'npc_walk_left2',  frames: this.anims.generateFrameNumbers('npc_sprite2', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
 
+    this.anims.create({ key: 'npc_walk_down3',  frames: this.anims.generateFrameNumbers('npc_sprite3', { start: 0,  end: 4  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_right3', frames: this.anims.generateFrameNumbers('npc_sprite3', { start: 5,  end: 9  }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_up3',    frames: this.anims.generateFrameNumbers('npc_sprite3', { start: 10, end: 14 }), frameRate: 8, repeat: -1 });
+    this.anims.create({ key: 'npc_walk_left3',  frames: this.anims.generateFrameNumbers('npc_sprite3', { start: 15, end: 19 }), frameRate: 8, repeat: -1 });
+
     // --------------------------
     // Spawn NPCs
     // --------------------------
     const spawnerObjects = map.getObjectLayer('NPC_spawners')?.objects || [];
-    this.npcs = {};
 
-    if (spawnerObjects.length > 0) {
-      const wanderFactory = (scene, npc, GRID) =>
-        new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 });
+    this.episode = new EpisodeManager(this, {
+      GRID: this.GRID,
+      stores: this.stores,
+      spawners: spawnerObjects,
+      wanderFactory: (scene, npc, GRID) =>
+        new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 })
+    });
 
-      for (let i = 0; i < maxNPCs; i++) {
-        const spawner = Phaser.Utils.Array.GetRandom(spawnerObjects);
-        const t = this.GRID.objectToTile(spawner.x, spawner.y);
-
-        const type = Math.random() < 0.5 ? 'type2' : 'type1';
-        const npc = new NPC(this, this.GRID, t.x, t.y, { type });
-
-        const strategy = new NearestRestaurantGoal(this, this.GRID, this.stores);
-
-        const eatCtrl = new EatOutController(this, npc, this.GRID, this.stores, strategy, {
-          eatMode: 'auto',
-          queueLoiterRadius: 4,
-          queueLoiterStepMinMs: 700,
-          queueLoiterStepMaxMs: 1800,
-          loiterMaxRadiusSearch: 25,
-          postEatWanderMinMs: 5000,
-          postEatWanderMaxMs: 12000,
-          wanderFactory
-        });
-
-        npc.setController(eatCtrl);
-        this.npcs[npc.id] = npc;
-      }
-    }
+    // start first episode
+    this.episode.startEpisode({
+      population: maxNPCs,       // you already have this
+      spawnMode: 'rate',         // or 'waves'
+      spawnRatePerSec: 80,       // tune
+      maxEpisodeMs: 5 * 60_000
+    });
 
     // --------------------------
     // Simulator Camera Controls (improved)
@@ -333,7 +330,7 @@ export const mainScene = {
       this._camDrag.vy = -dy;
     });
 
-    const minZoom = 0.5;
+    const minZoom = 0.2;
     const maxZoom = 2.0;
     const zoomStep = 0.1;
 
@@ -350,11 +347,49 @@ export const mainScene = {
     let width = this.GRID.tileToWorld(map.width + 1, map.height + 1).x + originX;
     let height = this.GRID.tileToWorld(map.width + 1, map.height + 1).y + originY;
     cam.centerOn((width / 2) + 50, (height / 2) + 100);
+
   },
 
   update(time, delta) {
-    // Update NPCs
-    Object.values(this.npcs).forEach(npc => npc.update());
+    // Update episode manager (spawning, episode state)
+    this.episode?.update?.();
+
+    // Update NPCs (episode-driven)
+    if (this.episode?.activeNpcs) {
+      for (const npc of this.episode.activeNpcs.values()) {
+        npc.update();
+      }
+    }
+
+    // ---------------- DEBUG: print remaining NPCs ----------------
+   /*
+    const npcs = this.episode?.activeNpcs;
+
+    if (npcs && npcs.size <= 10) {
+      for (const npc of npcs.values()) {
+        const ctrl = npc.getController?.();
+        console.warn(`[NPC DEBUG]`, {
+          id: npc.id,
+          npcState: npc.state,
+          busy: npc.isBusy?.(),
+          isInside: npc.isInside,
+          tile: [npc.tileX, npc.tileY],
+          goal: npc._goal,
+          targetNode: npc.targetNode,
+
+          controller: ctrl?.constructor?.name,
+          ctrlState: ctrl?.state,
+          ctrlActive: ctrl?._active,
+          ctrlHasTimer: !!ctrl?._timer,
+          ctrlHasQueueTimer: !!ctrl?._queueTimer,
+          ctrlHasHandoffTimer: !!ctrl?._handoffTimer,
+          storeId: ctrl?.store?.storeId ?? null,
+          assignKind: ctrl?._assignment?.kind ?? null,
+          meals: ctrl?._mealsEaten ?? null,
+          mealsMax: ctrl?._mealsBeforeDespawn ?? null
+        });
+      }
+    }*/
 
     // Camera inertia (smooth glide) when not dragging
     if (!this._camDrag) return;
@@ -376,6 +411,13 @@ export const mainScene = {
       }
     }
 
+    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    if (now - this._hudLastMs > this._hudThrottleMs) {
+      this._hudLastMs = now;
+      const count = this.episode?.activeNpcs?.size ?? 0;
+      if (this._hudNpcEl) this._hudNpcEl.textContent = `NPCs: ${count}`;
+    }
+
     // --------------------------
     // Google Maps Heatmap update
     // (tilemap corners -> visible map corners)
@@ -386,7 +428,6 @@ export const mainScene = {
     // Google script loads async; mapping may not be ready yet
     if (!heat || !tileToLatLngViewport || !this.mapRef) return;
 
-    const now = (typeof performance !== 'undefined' ? performance.now() : Date.now());
     if (now - this._heat.lastMs < this._heat.throttleMs) return;
     this._heat.lastMs = now;
 
@@ -395,21 +436,24 @@ export const mainScene = {
 
     const pts = [];
 
-    for (const npc of Object.values(this.npcs)) {
-      const ll = tileToLatLngViewport(
-        npc.tileX,
-        npc.tileY,
-        mapW,
-        mapH,
-        { base1: this._heat.base1Tiles }
-      );
+    const npcsIter = this.episode?.activeNpcs?.values?.();
+    if (npcsIter) {
+      for (const npc of npcsIter) {
+        const ll = tileToLatLngViewport(
+          npc.tileX,
+          npc.tileY,
+          mapW,
+          mapH,
+          { base1: this._heat.base1Tiles }
+        );
 
-      if (!ll) continue;
+        if (!ll) continue;
 
-      pts.push({
-        location: ll,
-        weight: 1
-      });
+        pts.push({
+          location: ll,
+          weight: 1
+        });
+      }
     }
 
     heat.setData(pts);

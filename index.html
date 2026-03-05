@@ -51,12 +51,33 @@
       inset: 0;          /* same as top/right/bottom/left: 0 */
       border-radius: 12px;
     }
+
+    /* -------- HUD overlay (HTML on top of Phaser canvas) -------- */
+    #hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 9999;
+      pointer-events: none;          /* clicks go through to Phaser */
+      font-family: monospace;
+      font-size: 18px;
+      color: #fff;
+      text-shadow:
+        0 2px 0 #000,
+        2px 0 0 #000,
+        0 -2px 0 #000,
+        -2px 0 0 #000;
+    }
   </style>
 </head>
 
 <body>
   <div class="layout">
-    <div id="game-container"></div>
+    <div id="game-container">
+      <div id="hud">
+        <div id="hud-npcs">NPCs: 0</div>
+      </div>
+    </div>
 
     <div id="map-wrap">
       <div id="map"></div>

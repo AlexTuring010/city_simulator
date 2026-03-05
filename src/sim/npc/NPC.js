@@ -13,6 +13,12 @@ import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js'
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY, { type = 'type1' } = {}) {
 
+    // DEBUG: movement watchdog
+    this._dbgLastTileX = this.tileX;
+    this._dbgLastTileY = this.tileY;
+    this._dbgLastMoveTime = performance.now();
+    this._dbgLastReport = 0;
+
     this.controllerStack = [];
 
     // "put inside" state
@@ -31,7 +37,13 @@ export class NPC {
     this.type = type;               // <-- remember what type this NPC is
     this.spriteKey = NPC.getSpriteKeyForType(type); // <-- resolve to spritesheet key
 
-    this.animSuffix = (this.type === 'type2') ? '2' : '';
+    if(type === 'type2'){
+      this.animSuffix = '2';
+    } else if (type == 'type3'){
+      this.animSuffix = '3';
+    } else {
+      this.animSuffix = '';
+    }
 
     this.scene = scene;
     this.GRID = GRID;
@@ -108,12 +120,23 @@ export class NPC {
 
   }
 
+  despawn(reason = 'DESPAWN') {
+    this.events.emit(NPC_EVENTS.DESPAWNED, { id: this.id, reason });
+    this.destroy();
+  }
+
   _animKey(dir) {
     return `npc_walk_${dir}${this.animSuffix}`;
   }
 
   static getSpriteKeyForType(type) {
-    return type === 'type2' ? 'npc_sprite2' : 'npc_sprite';
+    if(type === 'type2'){
+      return 'npc_sprite2';
+    } else if (type === 'type3'){
+      return 'npc_sprite3'
+    } else {
+      return 'npc_sprite'
+    }
   }
 
   setController(controller) {
@@ -412,6 +435,25 @@ export class NPC {
     });
 
     if (path && path.length === 1) {
+      // We are already at the goal. Emit ARRIVED so controllers don't hang.
+      this._goal = { x: goalX, y: goalY };
+
+      this.events.emit(NPC_EVENTS.GOAL_SET, { goalX, goalY });
+
+      // Keep state consistent: not moving anymore
+      this.state = 'IDLE';
+      this.setIdleFacing?.();
+      this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+
+      this.events.emit(NPC_EVENTS.ARRIVED, {
+        tileX: this.tileX,
+        tileY: this.tileY,
+        goal: this._goal
+      });
+
+      // Clear goal now that we "arrived"
+      this._goal = null;
+
       return true;
     }
 
@@ -507,8 +549,33 @@ export class NPC {
       return false;
     }
 
-    // Already there
-    if (d0 === 0) return true;
+    // Already there -> emit ARRIVED next tick so callers waiting on events still resolve
+    if (d0 === 0) {
+      // Keep goal metadata consistent
+      this._moveMode = 'NAV';
+      this._navStore = store;
+      this._navStuckFrames = 0;
+
+      this.path = [];
+      this.targetNode = null;
+
+      this._goal = { x: store.goalTile.x, y: store.goalTile.y, storeId: store.storeId };
+
+      // Ensure npc state is IDLE (it already is, but keep consistent)
+      this.state = 'IDLE';
+      this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
+
+      // Defer ARRIVED to next tick
+      this.scene.time.delayedCall(0, () => {
+        this.events.emit(NPC_EVENTS.ARRIVED, {
+          tileX: this.tileX,
+          tileY: this.tileY,
+          goal: this._goal
+        });
+      });
+
+      return true;
+    }
 
     // Switch to NAV mode
     this._moveMode = 'NAV';
@@ -751,6 +818,40 @@ export class NPC {
     }
 
     this._syncDepthAndShadow();
+
+    // ---------------- DEBUG: detect stuck NPCs ----------------
+
+    const now = performance.now();
+
+    // if NPC moved, reset timer
+    if (this.tileX !== this._dbgLastTileX || this.tileY !== this._dbgLastTileY) {
+      this._dbgLastTileX = this.tileX;
+      this._dbgLastTileY = this.tileY;
+      this._dbgLastMoveTime = now;
+    }
+
+    // if not moved for 5s, report
+    if (now - this._dbgLastMoveTime > 5000) {
+
+      // only log every 2 seconds to avoid spam
+      if (now - this._dbgLastReport > 2000) {
+
+        console.warn(
+          `[NPC STUCK?] id=${this.id}`,
+          {
+            state: this.state,
+            tile: [this.tileX, this.tileY],
+            targetNode: this.targetNode,
+            goal: this._goal,
+            isInside: this.isInside,
+            busy: this.isBusy?.(),
+            controller: this.getController?.()?.constructor?.name
+          }
+        );
+
+        this._dbgLastReport = now;
+      }
+    }
   }
 
   _syncDepthAndShadow() {

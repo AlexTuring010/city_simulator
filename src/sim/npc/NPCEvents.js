@@ -9,7 +9,8 @@ export const NPC_EVENTS = Object.freeze({
   STUCK: 'stuck',
   STOPPED: 'stopped',
   WAIT_DONE: 'waitDone', 
-  CALLED_TO_ENTER: 'called_to_enter'
+  CALLED_TO_ENTER: 'called_to_enter',
+  DESPAWNED: 'DESPAWNED' // for episodes to know when NPCs are fully removed
 });
 
 export const NPC_STUCK_REASONS = Object.freeze({

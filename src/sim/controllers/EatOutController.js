@@ -10,17 +10,20 @@
 //    - call store.requestEnter(npc) ONCE
 //      - ASSIGNED => move to target, then on ARRIVED:
 //          TABLE: table.seatNpcAt(npc, seatIdx) if exists else table.seatNpc(npc)
-//          INDOORS: store.pulseDoor();
+//          INDOORS: store.pulseDoor(); npc.putInside()
 //        wait eatMs, then:
 //          TABLE: table.unseatNpc(npc)
 //          INDOORS: npc.takeOutToTile(entryTile.x, entryTile.y)
 //        store.npcDoneEating(npc.id)
-//        move to nearest free tile, WAIT until ARRIVED/STUCK, then handoff to wander for a bit,
+//        move to nearest free tile, WAIT until ARRIVED/STUCK,
+//        then handoff to wander for a bit,
 //        then pop wander and restart fresh (clear visited).
 //      - QUEUED => loiter around store and listen for NPC_EVENTS.CALLED_TO_ENTER.
 //        When called, treat payload as ASSIGNED (no re-request).
-//      - QUEUE_FULL => mark store visited, search again; if no store found => wander then restart fresh.
-// 4) Controller can remove itself from queue when abandoning the store (store.removeFromQueue(npc))
+//      - QUEUE_FULL => mark store visited, search again;
+//        if no store found => wander then restart fresh.
+//
+// 4) After the NPC completes a few meals, it despawns itself (no leave controller yet).
 //
 // Assumptions (explicit, minimal):
 // - store.requestEnter(npc) returns:
@@ -32,6 +35,7 @@
 // - store.npcDoneEating(npcId) exists
 // - NPC emits events via npc.on/off (your NPC.js provides that)
 // - called-to-enter payload uses NPC_EVENTS.CALLED_TO_ENTER
+// - npc.despawn(reason) exists and emits NPC_EVENTS.DESPAWNED (EpisodeManager listens)
 //
 // NOTE: This controller NEVER depends on Store's internal table state.
 //       It only uses the assignment payload given by the Store.
@@ -61,6 +65,10 @@ export class EatOutController {
       postEatWanderMinMs = 4000,
       postEatWanderMaxMs = 10000,
 
+      // NEW: despawn after N completed meals
+      maxMealsBeforeDespawnMin = 2,
+      maxMealsBeforeDespawnMax = 5,
+
       wanderFactory = null
     } = {}
   ) {
@@ -81,6 +89,8 @@ export class EatOutController {
       exhaustedWanderMaxMs,
       postEatWanderMinMs,
       postEatWanderMaxMs,
+      maxMealsBeforeDespawnMin,
+      maxMealsBeforeDespawnMax,
       wanderFactory
     };
 
@@ -93,6 +103,13 @@ export class EatOutController {
     this.store = null;
     this._assignment = null;        // latest assignment (immediate or called_to_enter)
     this._visited = [];             // array of storeIds visited this cycle
+
+    // NEW: despawn counters (per NPC)
+    this._mealsEaten = 0;
+    this._mealsBeforeDespawn = Phaser.Math.Between(
+      this.cfg.maxMealsBeforeDespawnMin,
+      this.cfg.maxMealsBeforeDespawnMax
+    );
 
     // timers
     this._timer = null;
@@ -209,6 +226,7 @@ export class EatOutController {
 
     const excludeStoreIds = this._visited.slice();
 
+    // Strategy owns movement, so unbind core ARRIVED/STUCK during acquireTarget
     this._unbindNpcCore();
     let res = null;
     try {
@@ -353,7 +371,7 @@ export class EatOutController {
     this._goToAssignment(payload);
   }
 
-  // ---------------- movement / arrival waiting ----------------
+  // ---------------- movement ----------------
   _goToAssignment(assign) {
     if (!this._active || !this.store || !assign?.targetTile) return;
 
@@ -370,8 +388,6 @@ export class EatOutController {
   }
 
   _awaitArriveOrStuck(tag = 'await') {
-    // We don't add extra listeners; we use the existing _handleArrived/_handleStuck
-    // and resolve based on current state.
     return new Promise((resolve, reject) => {
       this._awaitCancel('new_await');
       this._await = { resolve, reject, tag };
@@ -392,12 +408,15 @@ export class EatOutController {
     a.reject?.({ reason, tag: a.tag });
   }
 
-  _handleArrived(_payload) {
+  _handleArrived(payload) {
+    if (this.state === 'MOVING_AWAY') {
+      console.warn(`[EatOut] NPC ${this.npc.id} ARRIVED while MOVING_AWAY await=${!!this._await}`);
+    }
     if (!this._active) return;
 
     // If we're awaiting "move away", resolve that.
     if (this.state === 'MOVING_AWAY') {
-      this._awaitResolve(true, _payload);
+      this._awaitResolve(true, payload);
       return;
     }
 
@@ -430,31 +449,32 @@ export class EatOutController {
     this._delay(eatMs, () => this._finishEating());
   }
 
-  _handleStuck(_payload) {
+  _handleStuck(payload) {
+    if (this.state === 'MOVING_AWAY') {
+      console.warn(`[EatOut] NPC ${this.npc.id} STUCK while MOVING_AWAY await=${!!this._await}`, payload);
+    } else{
+      console.warn(`[EatOut] NPC ${this.npc.id} STUCK while state=${this.state} await=${!!this._await}`, payload);
+    }
+
     if (!this._active) return;
 
     // If we were moving away, treat stuck as "done enough"
     if (this.state === 'MOVING_AWAY') {
-      this._awaitResolve(false, _payload);
+      this._awaitResolve(false, payload);
       return;
     }
 
-    // If stuck while moving to target, we can:
-    // - release assignment immediately to avoid deadlocks
-    // - notify store done (frees capacity for queue)
+    // If stuck while moving to target, release assignment + notify store
     const store = this.store;
     const assign = this._assignment;
 
     if (this.state === 'MOVING_TO_TARGET' && store && assign) {
-      // If table, unseat defensively (might not have seated yet; unseatNpc is safe in your Table)
       if (assign.kind === 'TABLE') {
         assign.table?.unseatNpc?.(this.npc);
-      } else if (assign.kind === 'INDOORS') {
-        // ensure visible if we had been put inside (probably not yet)
-        // no-op
       }
 
       store.npcDoneEating?.(this.npc.id);
+
       this._handoffToWanderThenRestart({
         minMs: this.cfg.exhaustedWanderMinMs,
         maxMs: this.cfg.exhaustedWanderMaxMs
@@ -469,9 +489,9 @@ export class EatOutController {
   async _finishEating() {
     if (!this._active) return;
 
-    this.store.pulseDoor?.(120);
+    this.store?.pulseDoor?.(120);
     this.npc.putOutside?.();
-  
+
     const store = this.store;
     const assign = this._assignment;
 
@@ -481,11 +501,10 @@ export class EatOutController {
       return;
     }
 
-    // 1) Visual / table internal cleanup is controller-owned:
+    // 1) Visual/table cleanup is controller-owned:
     if (assign.kind === 'TABLE') {
       assign.table?.unseatNpc?.(this.npc);
     } else if (assign.kind === 'INDOORS') {
-      // Bring them back out at entry tile (simple).
       const entry = store.entryTile;
       this.npc.takeOutToTile?.(entry.x, entry.y, { containerId: `store:${store.storeId}` });
     }
@@ -493,12 +512,32 @@ export class EatOutController {
     // 2) Notify store so it frees logs + calls next from queue
     store.npcDoneEating?.(this.npc.id);
 
+    // 2.5) Meals counter -> despawn
+    this._mealsEaten += 1;
+    if (this._mealsEaten >= this._mealsBeforeDespawn) {
+      this._leaveQueueIfNeeded();
+      this._clearTimers();
+
+      if (this._handoffTimer) {
+        this._handoffTimer.remove(false);
+        this._handoffTimer = null;
+      }
+
+      this._awaitCancel('despawn_after_meals');
+
+      try { this.npc.putOutside?.(); } catch (_) {}
+      this.npc.despawn?.('MEALS_DONE');
+      return;
+    }
+
     // 3) Move away to nearest free tile and WAIT until it's done
     const base = assign.targetTile ?? store.entryTile;
     const out = findClosestFreeTile(this.GRID, base.x, base.y, {
       maxRadius: 50,
       allowSame: false
     });
+
+    console.warn(`[EatOut] NPC ${this.npc.id} MOVE_AWAY from ${this.npc.tileX},${this.npc.tileY} -> ${out?.x},${out?.y}`);
 
     // cleanup current store context now (we're done with it)
     this._leaveQueueIfNeeded();
@@ -509,14 +548,17 @@ export class EatOutController {
       this.state = 'MOVING_AWAY';
       try { this.npc.stop?.('eatout_move_away'); } catch (_) {}
 
-      this.npc.goToTile(out.x, out.y, {
+      const waitMoveAway = this._awaitArriveOrStuck('move_away'); // <-- create FIRST
+
+      const ok = this.npc.goToTile(out.x, out.y, {
         allowWeakCollision: true,
         allowBlockedGoal: true,
         showIndicator: false
       });
 
+      // If goToTile returned false it *should* emit STUCK (possibly sync), but either way:
       try {
-        await this._awaitArriveOrStuck('move_away');
+        await waitMoveAway;
       } catch (_) {
         // ignore
       }

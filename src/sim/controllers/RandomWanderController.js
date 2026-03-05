@@ -158,7 +158,18 @@ export class RandomWanderController {
 
   _stepOnce() {
     if (!this._active) return;
-    if (!this.npc || this.npc.isBusy?.()) return;
+    if (!this.npc) return;
+
+    // If NPC is still finishing something, retry soon (DON'T just return forever)
+    if (this.npc.isBusy?.()) {
+      this._clearTimer();
+      this._timer = this.scene.time.delayedCall(50, () => {
+        this._timer = null;
+        this._stepOnce();
+      });
+      console.warn(`[RandomWander] NPC ${this.npc.id} is busy, retrying step...`);
+      return;
+    }
 
     const next = this._pickNextNeighbor();
     if (!next) {
@@ -166,7 +177,6 @@ export class RandomWanderController {
       return;
     }
 
-    // Requires NPC.stepToTile(x,y) (no pathfinding)
     const ok = this.npc.stepToTile(next.x, next.y, { showIndicator: false });
     if (!ok) {
       this.scheduleNext();
