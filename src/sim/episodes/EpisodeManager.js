@@ -5,7 +5,7 @@ import { RandomWanderController } from '../controllers/RandomWanderController.js
 import { NearestRestaurantGoal } from '../../strategies/NearestRestaurantGoal.js';
 
 export class EpisodeManager {
-  constructor(scene, { GRID, stores, spawners, wanderFactory } = {}) {
+  constructor(scene, { GRID, stores, spawners, wanderFactory, strategyFactory, onEpisodeEnd } = {}) {
     this.scene = scene;
     this.GRID = GRID;
     this.stores = stores;
@@ -14,6 +14,11 @@ export class EpisodeManager {
     this.wanderFactory =
       wanderFactory ||
       ((scene, npc, GRID) => new RandomWanderController(scene, npc, GRID, { minWaitMs: 800, maxWaitMs: 2500 }));
+
+    this.strategyFactory = strategyFactory ||
+      ((scene, GRID, stores) => new NearestRestaurantGoal(scene, GRID, stores));
+
+    this.onEpisodeEnd = onEpisodeEnd || null;
 
     // episode state
     this.episodeId = 0;
@@ -71,19 +76,33 @@ export class EpisodeManager {
 
     this._clearTimers();
 
-    // If you want: force-despawn anything still alive on episode end
-    // (or keep them to "finish leaving", up to you)
+    // Collect stats BEFORE despawning
+    const npcStats = [];
+    for (const npc of this.activeNpcs.values()) {
+      if (npc?.episodeStats) {
+        npcStats.push({ id: npc.id, ...structuredClone(npc.episodeStats) });
+      }
+    }
+    const storeStats = {};
+    for (const [id, store] of Object.entries(this.stores || {})) {
+      if (typeof store.getEpisodeStats === 'function') {
+        storeStats[id] = store.getEpisodeStats();
+      }
+    }
+
     for (const npc of this.activeNpcs.values()) {
       npc?.despawn?.('EPISODE_END');
     }
     this.activeNpcs.clear();
 
-    // reset world state between episodes (important for training determinism)
     this._resetStores();
 
-    // small delay then start next (or let caller decide)
+    // Fire callback with collected data
+    this.onEpisodeEnd?.(npcStats, storeStats, reason);
+
+    // small delay then start next
     this.scene.time.delayedCall(250, () => {
-      this.startEpisode(); // or comment out and call manually
+      this.startEpisode();
     });
   }
 
@@ -146,7 +165,7 @@ export class EpisodeManager {
         const npc = new NPC(this.scene, this.GRID, t.x, t.y, { type });
 
         // Build controllers (but DON'T start EatOut yet)
-        const strategy = new NearestRestaurantGoal(this.scene, this.GRID, this.stores);
+        const strategy = this.strategyFactory(this.scene, this.GRID, this.stores);
 
         const eatCtrl = new EatOutController(this.scene, npc, this.GRID, this.stores, strategy, {
         eatMode: 'auto',

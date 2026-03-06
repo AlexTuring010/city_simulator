@@ -3,14 +3,20 @@
  * ----------
  * Loads the tilemap JSON, then jumps to MainScene.
  */
-export const bootScene = {
-  key: 'BootScene',
 
-  preload() {
-    this.load.tilemapTiledJSON('map', 'map.json');
-  },
+export function createBootScene() {
+  return {
+    key: 'BootScene',
 
-  create() {
-    this.scene.start('MainScene');
-  }
-};
+    preload() {
+      this.load.tilemapTiledJSON('map', 'map.json');
+    },
+
+    create() {
+      this.scene.start('MainScene');
+    }
+  };
+}
+
+// Backward compat
+export const bootScene = createBootScene();
