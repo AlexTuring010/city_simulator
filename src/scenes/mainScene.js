@@ -25,6 +25,9 @@ export function createMainScene({
   onEpisodeEnd = null,
   onLiveUpdate = null,
   population = 2000,
+  deferStart = false,
+  onReady = null,
+  autoRestart = true,
 } = {}) {
   return {
     key: 'MainScene',
@@ -272,15 +275,21 @@ export function createMainScene({
         strategyFactory: strategyFactory ||
           ((scene, G, st) => new NearestRestaurantGoal(scene, G, st)),
         onEpisodeEnd: onEpisodeEnd,
+        autoRestart,
       });
 
-      // start first episode
-      this.episode.startEpisode({
+      this._episodeCfg = {
         population: maxNPCs,
         spawnMode: 'rate',
         spawnRatePerSec: 80,
         maxEpisodeMs: 5 * 60_000
-      });
+      };
+
+      if (deferStart) {
+        onReady?.(this);
+      } else {
+        this.episode.startEpisode(this._episodeCfg);
+      }
 
       // --------------------------
       // Simulator Camera Controls

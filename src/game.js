@@ -107,6 +107,38 @@ const collector = new MetricsCollector();
 collector.onUpdate = (data) => renderAllCharts(data);
 
 // ----------------------------------------------------
+// Episode coordinator — barrier-sync for A/B fairness
+// ----------------------------------------------------
+const coordinator = {
+  scenes: {},
+  readyCount: 0,
+  finishedCount: 0,
+  episodeCfg: null,
+
+  onSceneReady(simKey, scene) {
+    this.scenes[simKey] = scene;
+    if (!this.episodeCfg) this.episodeCfg = scene._episodeCfg;
+    this.readyCount++;
+    if (this.readyCount >= 2) this._startBoth();
+  },
+
+  onSceneEpisodeEnd(simKey, npcStats, storeStats) {
+    collector.collect(simKey, npcStats, storeStats);
+    this.finishedCount++;
+    if (this.finishedCount >= 2) this._startBoth();
+  },
+
+  _startBoth() {
+    this.finishedCount = 0;
+    setTimeout(() => {
+      for (const scene of Object.values(this.scenes)) {
+        scene.episode.startEpisode(this.episodeCfg);
+      }
+    }, 300);
+  }
+};
+
+// ----------------------------------------------------
 // Two Phaser instances
 // ----------------------------------------------------
 const population = 1000;
@@ -124,7 +156,10 @@ new Phaser.Game({
       simKey: 'baseline',
       strategyFactory: (sc, G, st) => new NearestRestaurantGoal(sc, G, st),
       hudElementId: 'hud-npcs-A',
-      onEpisodeEnd: (n, s) => collector.collect('baseline', n, s),
+      deferStart: true,
+      autoRestart: false,
+      onReady: (scene) => coordinator.onSceneReady('baseline', scene),
+      onEpisodeEnd: (n, s) => coordinator.onSceneEpisodeEnd('baseline', n, s),
       onLiveUpdate: (n, s) => collector.collect('baseline', n, s),
       population,
     })
@@ -149,7 +184,10 @@ new Phaser.Game({
       simKey: 'ai',
       strategyFactory: (sc, G, st) => new AIRecsRestaurantGoal(sc, G, st),
       hudElementId: 'hud-npcs-B',
-      onEpisodeEnd: (n, s) => collector.collect('ai', n, s),
+      deferStart: true,
+      autoRestart: false,
+      onReady: (scene) => coordinator.onSceneReady('ai', scene),
+      onEpisodeEnd: (n, s) => coordinator.onSceneEpisodeEnd('ai', n, s),
       onLiveUpdate: (n, s) => collector.collect('ai', n, s),
       population,
     })

@@ -5,7 +5,7 @@ import { RandomWanderController } from '../controllers/RandomWanderController.js
 import { NearestRestaurantGoal } from '../../strategies/NearestRestaurantGoal.js';
 
 export class EpisodeManager {
-  constructor(scene, { GRID, stores, spawners, wanderFactory, strategyFactory, onEpisodeEnd } = {}) {
+  constructor(scene, { GRID, stores, spawners, wanderFactory, strategyFactory, onEpisodeEnd, autoRestart = true } = {}) {
     this.scene = scene;
     this.GRID = GRID;
     this.stores = stores;
@@ -19,6 +19,7 @@ export class EpisodeManager {
       ((scene, GRID, stores) => new NearestRestaurantGoal(scene, GRID, stores));
 
     this.onEpisodeEnd = onEpisodeEnd || null;
+    this.autoRestart = autoRestart;
 
     // episode state
     this.episodeId = 0;
@@ -101,9 +102,11 @@ export class EpisodeManager {
     this.onEpisodeEnd?.(npcStats, storeStats, reason);
 
     // small delay then start next
-    this.scene.time.delayedCall(250, () => {
-      this.startEpisode();
-    });
+    if (this.autoRestart) {
+      this.scene.time.delayedCall(250, () => {
+        this.startEpisode();
+      });
+    }
   }
 
   // Call this from MainScene.update if you want; not required.
