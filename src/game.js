@@ -125,6 +125,7 @@ new Phaser.Game({
       strategyFactory: (sc, G, st) => new NearestRestaurantGoal(sc, G, st),
       hudElementId: 'hud-npcs-A',
       onEpisodeEnd: (n, s) => collector.collect('baseline', n, s),
+      onLiveUpdate: (n, s) => collector.collect('baseline', n, s),
       population,
     })
   ],
@@ -149,6 +150,7 @@ new Phaser.Game({
       strategyFactory: (sc, G, st) => new AIRecsRestaurantGoal(sc, G, st),
       hudElementId: 'hud-npcs-B',
       onEpisodeEnd: (n, s) => collector.collect('ai', n, s),
+      onLiveUpdate: (n, s) => collector.collect('ai', n, s),
       population,
     })
   ],

@@ -28,8 +28,11 @@ function getOrCreate(canvasId, type, config) {
   const ctx = document.getElementById(canvasId)?.getContext('2d');
   if (!ctx) return null;
 
-  if (chartInstances[canvasId]) {
-    chartInstances[canvasId].destroy();
+  const existing = chartInstances[canvasId];
+  if (existing) {
+    existing.data = config.data;
+    existing.update('none');
+    return existing;
   }
 
   chartInstances[canvasId] = new Chart(ctx, {
@@ -37,7 +40,6 @@ function getOrCreate(canvasId, type, config) {
     data: config.data,
     options: { ...CHART_DEFAULTS, ...config.options }
   });
-
   return chartInstances[canvasId];
 }
 

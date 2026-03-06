@@ -23,6 +23,7 @@ export function createMainScene({
   strategyFactory = null,
   hudElementId = 'hud-npcs',
   onEpisodeEnd = null,
+  onLiveUpdate = null,
   population = 2000,
 } = {}) {
   return {
@@ -70,13 +71,16 @@ export function createMainScene({
       // Init per-instance throttling state
       this._heat = {
         lastMs: 0,
-        throttleMs: 300,
+        throttleMs: 150,
         base1Tiles: true
       };
 
       this._hudNpcEl = document.getElementById(hudElementId);
       this._hudLastMs = 0;
       this._hudThrottleMs = 150;
+
+      this._liveStatsLastMs = 0;
+      this._liveStatsThrottleMs = 2000;
 
       const map = this.make.tilemap({ key: 'map' });
       this.mapRef = map;
@@ -387,9 +391,27 @@ export function createMainScene({
       }
 
       // --------------------------
+      // Live stats collection
+      // --------------------------
+      if (onLiveUpdate && this.episode?.running
+          && now - this._liveStatsLastMs > this._liveStatsThrottleMs) {
+        this._liveStatsLastMs = now;
+        const liveNpcStats = [];
+        for (const npc of this.episode.activeNpcs.values()) {
+          if (npc?.episodeStats) liveNpcStats.push({ id: npc.id, ...npc.episodeStats });
+        }
+        const liveStoreStats = {};
+        for (const [id, store] of Object.entries(this.stores)) {
+          if (typeof store.getEpisodeStats === 'function')
+            liveStoreStats[id] = store.getEpisodeStats();
+        }
+        onLiveUpdate(liveNpcStats, liveStoreStats);
+      }
+
+      // --------------------------
       // Google Maps Heatmap update
       // --------------------------
-      const simData = window.__simMaps__?.[this._simKey];
+      const simData = window.__simMaps__?.[simKey];
       const heat = simData?.heatmap;
       const tileToLatLngViewport = simData?.tileToLatLng;
 
