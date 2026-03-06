@@ -12,6 +12,7 @@ import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js'
 
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY, { type = 'type1' } = {}) {
+    this.resetEpisodeStats();
 
     // DEBUG: movement watchdog
     this._dbgLastTileX = this.tileX;
@@ -118,6 +119,57 @@ export class NPC {
     this.setIdleFacing();
     this._syncDepthAndShadow();
 
+  }
+
+  resetEpisode() {
+    this.resetEpisodeStats();
+    this.stop('EPISODE_RESET');
+    this.putOutside?.({ reason: 'EPISODE_RESET' });
+  }
+
+  resetEpisodeStats() {
+    this.episodeStats = {
+      attempts: [],              // chronological store interactions
+      abandonedDueToQueue: 0,
+      servedStoreId: null,
+      successfulVisits: 0
+    };
+  }
+
+  recordStoreAttempt({
+    storeId,
+    status,                     // ARRIVED | ASSIGNED | QUEUED | LEFT_QUEUE | QUEUE_FULL | SERVED | FULL
+    occupancyPct = 0,
+    occupancyBin = null,
+    queueLen = 0,
+    queueBin = null,
+    timestamp = 0
+  } = {}) {
+    this.episodeStats.attempts.push({
+      storeId,
+      status,
+      occupancyPct,
+      occupancyBin,
+      queueLen,
+      queueBin,
+      timestamp
+    });
+
+    if (status === 'LEFT_QUEUE' || status === 'QUEUE_FULL' || status === 'FULL') {
+      this.episodeStats.abandonedDueToQueue += 1;
+    }
+
+    if (status === 'SERVED') {
+      this.episodeStats.successfulVisits += 1;
+      this.episodeStats.servedStoreId = storeId;
+    }
+  }
+
+  getEpisodeJourneySummary() {
+    return this.episodeStats.attempts.map(a => ({
+      storeId: a.storeId,
+      status: a.status
+    }));
   }
 
   despawn(reason = 'DESPAWN') {
@@ -818,40 +870,6 @@ export class NPC {
     }
 
     this._syncDepthAndShadow();
-
-    // ---------------- DEBUG: detect stuck NPCs ----------------
-
-    const now = performance.now();
-
-    // if NPC moved, reset timer
-    if (this.tileX !== this._dbgLastTileX || this.tileY !== this._dbgLastTileY) {
-      this._dbgLastTileX = this.tileX;
-      this._dbgLastTileY = this.tileY;
-      this._dbgLastMoveTime = now;
-    }
-
-    // if not moved for 5s, report
-    if (now - this._dbgLastMoveTime > 5000) {
-
-      // only log every 2 seconds to avoid spam
-      if (now - this._dbgLastReport > 2000) {
-
-        console.warn(
-          `[NPC STUCK?] id=${this.id}`,
-          {
-            state: this.state,
-            tile: [this.tileX, this.tileY],
-            targetNode: this.targetNode,
-            goal: this._goal,
-            isInside: this.isInside,
-            busy: this.isBusy?.(),
-            controller: this.getController?.()?.constructor?.name
-          }
-        );
-
-        this._dbgLastReport = now;
-      }
-    }
   }
 
   _syncDepthAndShadow() {

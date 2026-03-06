@@ -63,6 +63,8 @@ export class Store {
     storeType = 'left_restaurant',
     maxQueue = null
   } = {}) {
+    this.resetEpisodeStats();
+
     this.scene = scene;
     this.GRID = GRID;
 
@@ -114,6 +116,131 @@ export class Store {
     this._lastLabel = '';
     this._createCapacityLabel();
     this._refreshCapacityLabel(true);
+  }
+
+  resetEpisode() {
+    // queue state
+    this.queue.clear();
+    this.queued.clear();
+
+    // occupancy state
+    this._npcPlacement.clear();
+    this._freeIndoor = this.indoorsCapacity;
+
+    for (const [tid] of this._tableSeats.entries()) {
+      this._tableSeats.set(tid, [null, null]);
+    }
+
+    // visuals / timers
+    if (this._doorTimer) {
+      this._doorTimer.remove(false);
+      this._doorTimer = null;
+    }
+    this.closeDoor();
+
+    // analytics
+    this.resetEpisodeStats();
+
+    this._refreshCapacityLabel(true);
+  }
+
+  resetEpisodeStats() {
+    this.stats = {
+      arrivals: [],
+
+      crowdnessAtArrivalBins: {
+        '0_20': 0,
+        '20_40': 0,
+        '40_60': 0,
+        '60_80': 0,
+        '80_100': 0
+      },
+
+      queueAtArrivalBins: {
+        '0': 0,
+        '1_5': 0,
+        '6_10': 0,
+        '10_plus': 0
+      },
+
+      leftDueToQueueCount: 0,
+      queueFullRejects: 0,
+      servedCount: 0,
+      totalAttempts: 0
+    };
+  }
+
+  _getCrowdnessPct() {
+    const cap = this.getServiceCapacity();
+    if (cap <= 0) return 0;
+
+    const occupied =
+      (this.indoorsCapacity - this._freeIndoor) +
+      this._countOccupiedTableSeats();
+
+    return Math.round((occupied / cap) * 100);
+  }
+
+  _getCrowdnessBin(pct) {
+    if (pct < 20) return '0_20';
+    if (pct < 40) return '20_40';
+    if (pct < 60) return '40_60';
+    if (pct < 80) return '60_80';
+    return '80_100';
+  }
+
+  _getQueueBin(queueLen) {
+    if (queueLen <= 0) return '0';
+    if (queueLen <= 5) return '1_5';
+    if (queueLen <= 10) return '6_10';
+    return '10_plus';
+  }
+
+  _snapshotArrival(npcId) {
+    const occupancyPct = this._getCrowdnessPct();
+    const queueLen = this.queued.size;
+
+    return {
+      npcId,
+      storeId: this.storeId,
+      occupancyPct,
+      occupancyBin: this._getCrowdnessBin(occupancyPct),
+      queueLen,
+      queueBin: this._getQueueBin(queueLen),
+      timestamp: this.scene?.time?.now ?? performance.now()
+    };
+  }
+
+  _recordArrivalSample(sample) {
+    this.stats.totalAttempts += 1;
+    this.stats.arrivals.push(sample);
+    this.stats.crowdnessAtArrivalBins[sample.occupancyBin] += 1;
+    this.stats.queueAtArrivalBins[sample.queueBin] += 1;
+  }
+
+  recordQueueAbandon(npcOrId) {
+    const npcId = typeof npcOrId === 'object' ? npcOrId?.id : npcOrId;
+    if (npcId == null) return false;
+
+    const removed = this.queued.delete(npcId);
+    if (removed) {
+      this.stats.leftDueToQueueCount += 1;
+      this._refreshCapacityLabel();
+    }
+    return removed;
+  }
+
+  getEpisodeStats() {
+    return {
+      storeId: this.storeId,
+      servedCount: this.stats.servedCount,
+      leftDueToQueueCount: this.stats.leftDueToQueueCount,
+      queueFullRejects: this.stats.queueFullRejects,
+      totalAttempts: this.stats.totalAttempts,
+      crowdnessAtArrivalBins: { ...this.stats.crowdnessAtArrivalBins },
+      queueAtArrivalBins: { ...this.stats.queueAtArrivalBins },
+      arrivals: this.stats.arrivals.slice()
+    };
   }
 
   // ---------------- visuals/collision ----------------
@@ -332,9 +459,26 @@ export class Store {
   removeFromQueue(npc) {
     const npcId = npc?.id;
     if (npcId == null) return false;
+
     const removed = this.queued.delete(npcId);
-    if (removed) this._refreshCapacityLabel();
-    return removed;
+    if (!removed) return false;
+
+    this.stats.leftDueToQueueCount += 1;
+
+    if (typeof npc?.recordStoreAttempt === 'function') {
+      npc.recordStoreAttempt({
+        storeId: this.storeId,
+        status: 'LEFT_QUEUE',
+        occupancyPct: this._getCrowdnessPct(),
+        occupancyBin: this._getCrowdnessBin(this._getCrowdnessPct()),
+        queueLen: this.queued.size,
+        queueBin: this._getQueueBin(this.queued.size),
+        timestamp: this.scene?.time?.now ?? performance.now()
+      });
+    }
+
+    this._refreshCapacityLabel();
+    return true;
   }
 
   // ---------------- main API ----------------
@@ -342,6 +486,22 @@ export class Store {
     const npcId = npc?.id;
     if (npcId == null) return { ok: false, status: 'BAD_NPC_ID' };
 
+    // snapshot store state at arrival
+    const arrival = this._snapshotArrival(npcId);
+    this._recordArrivalSample(arrival);
+
+    if (typeof npc?.recordStoreAttempt === 'function') {
+      npc.recordStoreAttempt({
+        storeId: this.storeId,
+        status: 'ARRIVED',
+        occupancyPct: arrival.occupancyPct,
+        occupancyBin: arrival.occupancyBin,
+        queueLen: arrival.queueLen,
+        queueBin: arrival.queueBin,
+        timestamp: arrival.timestamp
+      });
+    }
+  
     // Idempotent: if already assigned, return same assignment.
     const existing = this._npcPlacement.get(npcId);
     if (existing) {
@@ -356,18 +516,54 @@ export class Store {
     // Try assign immediately
     const placement = this._assignNow(npcId);
     if (placement) {
+      if (typeof npc?.recordStoreAttempt === 'function') {
+        npc.recordStoreAttempt({
+          storeId: this.storeId,
+          status: 'ASSIGNED',
+          occupancyPct: arrival.occupancyPct,
+          occupancyBin: arrival.occupancyBin,
+          queueLen: arrival.queueLen,
+          queueBin: arrival.queueBin,
+          timestamp: arrival.timestamp
+        });
+      }
+
       this._refreshCapacityLabel();
       return { ok: true, status: 'ASSIGNED', ...this._buildPayload(npcId, placement) };
     }
 
     // No space -> queue (bounded)
     if (this.queued.size >= this.maxQueue) {
+      this.stats.queueFullRejects += 1;
+      if (typeof npc?.recordStoreAttempt === 'function') {
+        npc.recordStoreAttempt({
+          storeId: this.storeId,
+          status: 'QUEUE_FULL',
+          occupancyPct: arrival.occupancyPct,
+          occupancyBin: arrival.occupancyBin,
+          queueLen: arrival.queueLen,
+          queueBin: arrival.queueBin,
+          timestamp: arrival.timestamp
+        });
+      }
       return { ok: false, status: 'QUEUE_FULL' };
     }
 
     this.queued.add(npcId);
     this.queue.push(npc);
     this._refreshCapacityLabel();
+
+    if (typeof npc?.recordStoreAttempt === 'function') {
+      npc.recordStoreAttempt({
+        storeId: this.storeId,
+        status: 'QUEUED',
+        occupancyPct: arrival.occupancyPct,
+        occupancyBin: arrival.occupancyBin,
+        queueLen: arrival.queueLen,
+        queueBin: arrival.queueBin,
+        timestamp: arrival.timestamp
+      });
+    }
 
     return { ok: false, status: 'QUEUED' };
   }
@@ -385,6 +581,20 @@ export class Store {
     this._drainQueue();
     this._refreshCapacityLabel();
 
+    this.stats.servedCount += 1;
+
+    if (typeof npcOrId === 'object' && typeof npcOrId.recordStoreAttempt === 'function') {
+      npcOrId.recordStoreAttempt({
+        storeId: this.storeId,
+        status: 'SERVED',
+        occupancyPct: this._getCrowdnessPct(),
+        occupancyBin: this._getCrowdnessBin(this._getCrowdnessPct()),
+        queueLen: this.queued.size,
+        queueBin: this._getQueueBin(this.queued.size),
+        timestamp: this.scene?.time?.now ?? performance.now()
+      });
+    }
+  
     return true;
   }
 

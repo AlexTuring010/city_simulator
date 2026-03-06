@@ -137,18 +137,18 @@ export class EpisodeManager {
     if (!this.spawners.length) return;
 
     for (let i = 0; i < n; i++) {
-      if (this.spawnedCount >= this.cfg.population) break;
+        if (this.spawnedCount >= this.cfg.population) break;
 
-      const spawner = Phaser.Utils.Array.GetRandom(this.spawners);
-      const t = this.GRID.objectToTile(spawner.x, spawner.y);
+        const spawner = Phaser.Utils.Array.GetRandom(this.spawners);
+        const t = this.GRID.objectToTile(spawner.x, spawner.y);
 
-      const type = Phaser.Utils.Array.GetRandom(['type1', 'type2', 'type3']);
-      const npc = new NPC(this.scene, this.GRID, t.x, t.y, { type });
+        const type = Phaser.Utils.Array.GetRandom(['type1', 'type2', 'type3']);
+        const npc = new NPC(this.scene, this.GRID, t.x, t.y, { type });
 
-      // Attach controllers for this episode
-      const strategy = new NearestRestaurantGoal(this.scene, this.GRID, this.stores);
+        // Build controllers (but DON'T start EatOut yet)
+        const strategy = new NearestRestaurantGoal(this.scene, this.GRID, this.stores);
 
-      const eatCtrl = new EatOutController(this.scene, npc, this.GRID, this.stores, strategy, {
+        const eatCtrl = new EatOutController(this.scene, npc, this.GRID, this.stores, strategy, {
         eatMode: 'auto',
         queueLoiterRadius: 4,
         queueLoiterStepMinMs: 700,
@@ -157,12 +157,39 @@ export class EpisodeManager {
         postEatWanderMinMs: 5000,
         postEatWanderMaxMs: 12000,
         wanderFactory: this.wanderFactory
-      });
+        });
 
-      npc.setController(eatCtrl);
+        // Start with wander ONLY
+        const wanderCtrl = this.wanderFactory(this.scene, npc, this.GRID);
+        npc.setController(wanderCtrl);
 
-      this._trackNpc(npc);
-      this.spawnedCount++;
+        // Warmup then switch to EatOut
+        const warmupMinMs = 3000;
+        const warmupMaxMs = 15000;
+        const warmupMs = Phaser.Math.Between(warmupMinMs, warmupMaxMs);
+
+        let warmupTimer = this.scene.time.delayedCall(warmupMs, () => {
+        warmupTimer = null;
+
+        // stop any mid-wander movement so we don't "carry momentum" into eat logic
+        npc.stop?.('warmup_done');
+
+        // Replace wander with EatOut (EatOut will start immediately)
+        npc.setController(eatCtrl);
+        });
+
+        // If NPC despawns before warmup ends, cancel timer
+        const onDespawn = () => {
+        npc.off(NPC_EVENTS.DESPAWNED, onDespawn);
+        if (warmupTimer) {
+            warmupTimer.remove(false);
+            warmupTimer = null;
+        }
+        };
+        npc.on(NPC_EVENTS.DESPAWNED, onDespawn);
+
+        this._trackNpc(npc);
+        this.spawnedCount++;
     }
   }
 

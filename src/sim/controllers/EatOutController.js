@@ -267,7 +267,6 @@ export class EatOutController {
 
     if (!res || !res.status) {
       // Defensive: treat as queued
-      console.warn(`store.requestEnter returned invalid response for NPC ${this.npc.id}; treating as QUEUED.`);
       this._enterQueued();
       return;
     }
@@ -300,7 +299,6 @@ export class EatOutController {
     }
 
     // Unknown -> queued
-    console.warn(`store.requestEnter returned unknown status "${res.status}" for NPC ${this.npc.id}; treating as QUEUED.`);
     this._enterQueued();
   }
 
@@ -409,9 +407,6 @@ export class EatOutController {
   }
 
   _handleArrived(payload) {
-    if (this.state === 'MOVING_AWAY') {
-      console.warn(`[EatOut] NPC ${this.npc.id} ARRIVED while MOVING_AWAY await=${!!this._await}`);
-    }
     if (!this._active) return;
 
     // If we're awaiting "move away", resolve that.
@@ -450,11 +445,6 @@ export class EatOutController {
   }
 
   _handleStuck(payload) {
-    if (this.state === 'MOVING_AWAY') {
-      console.warn(`[EatOut] NPC ${this.npc.id} STUCK while MOVING_AWAY await=${!!this._await}`, payload);
-    } else{
-      console.warn(`[EatOut] NPC ${this.npc.id} STUCK while state=${this.state} await=${!!this._await}`, payload);
-    }
 
     if (!this._active) return;
 
@@ -536,8 +526,6 @@ export class EatOutController {
       maxRadius: 50,
       allowSame: false
     });
-
-    console.warn(`[EatOut] NPC ${this.npc.id} MOVE_AWAY from ${this.npc.tileX},${this.npc.tileY} -> ${out?.x},${out?.y}`);
 
     // cleanup current store context now (we're done with it)
     this._leaveQueueIfNeeded();
