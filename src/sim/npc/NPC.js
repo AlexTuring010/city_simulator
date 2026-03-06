@@ -12,13 +12,8 @@ import { NPC_EVENTS, NPC_STUCK_REASONS, NPC_STOP_REASONS } from './NPCEvents.js'
 
 export class NPC {
   constructor(scene, GRID, startTileX, startTileY, { type = 'type1' } = {}) {
+    this._isCountingWalkToStore = false;
     this.resetEpisodeStats();
-
-    // DEBUG: movement watchdog
-    this._dbgLastTileX = this.tileX;
-    this._dbgLastTileY = this.tileY;
-    this._dbgLastMoveTime = performance.now();
-    this._dbgLastReport = 0;
 
     this.controllerStack = [];
 
@@ -56,6 +51,12 @@ export class NPC {
     this.facing = 'down';
     this.tileX = startTileX;
     this.tileY = startTileY;
+
+     // DEBUG: movement watchdog
+    this._dbgLastTileX = this.tileX;
+    this._dbgLastTileY = this.tileY;
+    this._dbgLastMoveTime = performance.now();
+    this._dbgLastReport = 0;
 
     // movement state
     this.state = 'IDLE'; // 'IDLE' | 'WAITING' | 'MOVING'
@@ -121,6 +122,19 @@ export class NPC {
 
   }
 
+  _beginWalkToStoreMetric() {
+    this._isCountingWalkToStore = true;
+  }
+
+  _endWalkToStoreMetric() {
+    this._isCountingWalkToStore = false;
+  }
+
+  _addWalkToStoreTileStep(steps = 1) {
+    if (!this._isCountingWalkToStore || steps <= 0) return;
+    this.episodeStats.walkedToStoresTiles += steps;
+  }
+
   resetEpisode() {
     this.resetEpisodeStats();
     this.stop('EPISODE_RESET');
@@ -132,7 +146,8 @@ export class NPC {
       attempts: [],              // chronological store interactions
       abandonedDueToQueue: 0,
       servedStoreId: null,
-      successfulVisits: 0
+      successfulVisits: 0,
+      walkedToStoresTiles: 0
     };
   }
 
@@ -359,6 +374,7 @@ export class NPC {
     this._moveMode = 'PATH';
     this._navStore = null;
     this._navStuckFrames = 0;
+    this._endWalkToStoreMetric();
 
     this.pathCache = null;
     this.pathCacheIdx = 0;
@@ -396,6 +412,9 @@ export class NPC {
   }
 
   stepToTile(goalX, goalY, { showIndicator = false, indicatorColor = 0x33ff77 } = {}) {
+    // Safety check cause stepToTile shouldnt be counted in walkToStore metric
+    this._endWalkToStoreMetric();
+
     // must be adjacent
     const dx = Math.abs(goalX - this.tileX);
     const dy = Math.abs(goalY - this.tileY);
@@ -455,6 +474,9 @@ export class NPC {
     indicatorColor = 0x33ff77
   } = {}
   ) {
+    // Safety check cause gototile shouldnt be counted in walkToStore metric 
+    this._endWalkToStoreMetric();
+
     // Apply per-goal indicator settings
     this.showPathIndicator = !!showIndicator;
     this.pathIndicatorColor = indicatorColor;
@@ -591,6 +613,7 @@ export class NPC {
     // If unreachable, fail fast
     const d0 = store.nav.getDistance(this.tileX, this.tileY);
     if (d0 < 0) {
+      this._endWalkToStoreMetric();
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.NO_PATH,
         goalX: store.goalTile.x,
@@ -603,6 +626,8 @@ export class NPC {
 
     // Already there -> emit ARRIVED next tick so callers waiting on events still resolve
     if (d0 === 0) {
+      this._endWalkToStoreMetric();
+      
       // Keep goal metadata consistent
       this._moveMode = 'NAV';
       this._navStore = store;
@@ -654,6 +679,7 @@ export class NPC {
     // Prime the first step
     const next = store.nav.getNextStep(this.tileX, this.tileY);
     if (!next) {
+      this._endWalkToStoreMetric();
       // If distance was >0 but no next, treat as stuck (data inconsistency)
       this.events.emit(NPC_EVENTS.STUCK, {
         reason: NPC_STUCK_REASONS.NO_PATH,
@@ -667,6 +693,7 @@ export class NPC {
 
     this.targetNode = next;
     this.state = 'MOVING';
+    this._beginWalkToStoreMetric();
 
     this.events.emit(NPC_EVENTS.STATE_CHANGED, this.state);
     this.events.emit(NPC_EVENTS.GOAL_SET, { goalX: store.goalTile.x, goalY: store.goalTile.y, storeId: store.storeId });
@@ -736,6 +763,7 @@ export class NPC {
         this._moveMode = 'PATH';
         this._navStore = null;
         this._navStuckFrames = 0;
+        this._endWalkToStoreMetric();
 
         this.pathCache = null;
         this.pathCacheIdx = 0;
@@ -761,6 +789,7 @@ export class NPC {
         this._navStuckFrames++;
         if (this._navStuckFrames >= 10) {
           this._navStuckFrames = 0;
+          this._endWalkToStoreMetric();
           this.events.emit(NPC_EVENTS.STUCK, {
             reason: NPC_STUCK_REASONS.NO_PATH,
             goalX: store.goalTile?.x,
@@ -798,6 +827,10 @@ export class NPC {
 
       this.tileX = this.targetNode.x;
       this.tileY = this.targetNode.y;
+
+      if (this._moveMode === 'NAV') {
+        this._addWalkToStoreTileStep(1);
+      }
 
       if (this._moveMode === 'PATH') {
         if (this.path.length > 0) {
