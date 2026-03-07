@@ -263,6 +263,10 @@ export class EatOutController {
   _requestEnterCurrentStore() {
     if (!this._active || !this.store) return;
 
+    // We have arrived at the chosen store.
+    // From this point onward, Store becomes the source of truth.
+    this.strategy?.releaseReservation?.(this.npc);
+    
     const res = this.store.requestEnter?.(this.npc);
 
     if (!res || !res.status) {

@@ -118,6 +118,22 @@ export class Store {
     this._refreshCapacityLabel(true);
   }
 
+
+  getOccupiedServiceCount() {
+    return (
+      (this.indoorsCapacity - this._freeIndoor) +
+      this._countOccupiedTableSeats()
+    );
+  }
+
+  getAvailableServiceSlots() {
+    return Math.max(0, this.getServiceCapacity() - this.getOccupiedServiceCount());
+  }
+
+  getQueueLength() {
+    return this.queued.size;
+  }
+
   resetEpisode() {
     // queue state
     this.queue.clear();
@@ -436,7 +452,11 @@ export class Store {
   _recomputeDefaultMaxQueue() {
     if (!this._autoMaxQueue) return;
     const cap = this.getServiceCapacity();
-    this.maxQueue = Math.max(4, Math.ceil(cap / 2));
+
+    const minQueue = 10;
+    const queueMult = 1.5;
+
+    this.maxQueue = Math.max(minQueue, Math.ceil(cap * queueMult));
   }
 
   // ---------------- tables ----------------

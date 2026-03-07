@@ -6,9 +6,15 @@ export function assignAutoIndoorsCapacities(storesById, totalNPCs, opts = {}) {
     // Total "service capacity" target per store (indoors + outside tables)
     targetTotalPerStore = null, // default = ceil(totalNPCs / #stores)
 
+    // New: pressure factor
+    // 1.0 = current behavior
+    // 0.7 = tighter capacities
+    // 0.5 = aggressive crowding
+    targetLoadFactor = 0.6,
+
     // Cap indoors so it never gets silly
-    maxIndoorsAbs = 50,     // hard cap indoors
-    maxIndoorsMult = 2.0,   // indoors <= outdoorSeats * mult (helps table-heavy stores)
+    maxIndoorsAbs = 30,
+    maxIndoorsMult = 1.0,
 
     // Minimum indoors you still want even if many tables
     minIndoors = 0
@@ -18,7 +24,8 @@ export function assignAutoIndoorsCapacities(storesById, totalNPCs, opts = {}) {
   const stores = Object.values(storesById || {}).filter(s => s && types.has(s.storeType));
   if (!stores.length) return;
 
-  const target = targetTotalPerStore ?? Math.ceil(totalNPCs / stores.length);
+  const baseTarget = targetTotalPerStore ?? Math.ceil(totalNPCs / stores.length);
+  const target = Math.max(0, Math.ceil(baseTarget * targetLoadFactor));
 
   for (const s of stores) {
     // If indoorsCapacity is explicitly set (>0), keep it
@@ -27,13 +34,11 @@ export function assignAutoIndoorsCapacities(storesById, totalNPCs, opts = {}) {
     const tableCount = (s.tables?.length ?? 0) | 0;
     const outdoorSeats = tableCount * seatsPerTable;
 
-    // base: meet target total by filling indoors after outdoor is counted
+    // Meet reduced target after accounting for outdoor seats
     let indoors = target - outdoorSeats;
 
-    // clamp to at least minIndoors
     if (indoors < minIndoors) indoors = minIndoors;
 
-    // cap indoors based on outdoorSeats and absolute cap
     const capByOutdoor = Math.ceil(outdoorSeats * maxIndoorsMult);
     const cap = Math.min(maxIndoorsAbs, capByOutdoor || maxIndoorsAbs);
 

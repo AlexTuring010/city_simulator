@@ -80,15 +80,23 @@ const MAP_CONFIG = {
   draggable: false
 };
 
-async function initMapForSim(domId, simKey) {
+async function initMapForSim(domId, simKey, heatmapOpts = {}) {
   await waitForGoogleMaps();
-  const map = new google.maps.Map(document.getElementById(domId), { ...MAP_CONFIG });
+
+  const map = new google.maps.Map(
+    document.getElementById(domId),
+    { ...MAP_CONFIG }
+  );
+
   const heatmap = new google.maps.visualization.HeatmapLayer({
     data: [],
     radius: 35,
-    opacity: 0.7
+    opacity: 0.7,
+    ...heatmapOpts
   });
+
   heatmap.setMap(map);
+
   window.__simMaps__[simKey] = {
     map,
     heatmap,
@@ -97,8 +105,16 @@ async function initMapForSim(domId, simKey) {
 }
 
 // Init both maps (non-blocking)
-initMapForSim('map-A', 'baseline');
-initMapForSim('map-B', 'ai');
+initMapForSim('map-A', 'baseline', {
+  radius: 35,
+  opacity: 0.7
+});
+
+initMapForSim('map-B', 'ai', {
+  radius: 35,
+  opacity: 0.7,
+  maxIntensity: 30
+});
 
 // ----------------------------------------------------
 // Metrics collector
