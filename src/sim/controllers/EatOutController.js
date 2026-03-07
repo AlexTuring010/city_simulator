@@ -69,7 +69,8 @@ export class EatOutController {
       maxMealsBeforeDespawnMin = 2,
       maxMealsBeforeDespawnMax = 5,
 
-      wanderFactory = null
+      wanderFactory = null,
+      wandersBeforeRefresh = 3
     } = {}
   ) {
     this.scene = scene;
@@ -93,6 +94,9 @@ export class EatOutController {
       maxMealsBeforeDespawnMax,
       wanderFactory
     };
+
+    this._wanderCyclesSinceRefresh = 0;
+    this._wandersBeforeRefresh = 1;//wandersBeforeRefresh;
 
     this._active = false;
 
@@ -129,7 +133,7 @@ export class EatOutController {
   onStart() {
     this._active = true;
     this._bindNpcCore();
-    this._restartFresh();
+    this._restartFresh({ clearVisited: true });
   }
 
   onPause() {
@@ -204,7 +208,7 @@ export class EatOutController {
     return this.storesById ? Object.keys(this.storesById).length : 0;
   }
 
-  _restartFresh() {
+  _restartFresh({ clearVisited = false } = {}) {
     if (!this._active) return;
     this._clearTimers();
     this._awaitCancel('restart_fresh');
@@ -213,8 +217,10 @@ export class EatOutController {
     this.store = null;
     this._assignment = null;
 
-    // "starting fresh" means clear visited
-    this._visited.length = 0;
+    if (clearVisited) {
+      this._visited.length = 0;
+      this._wanderCyclesSinceRefresh = 0;
+    }
 
     this.state = 'SEARCHING';
     this._searchNextStore();
@@ -252,7 +258,9 @@ export class EatOutController {
   }
 
   _handleNoStoresAvailable() {
-    // no stores found (likely visited all)
+    this._visited.length = 0;
+    this._wanderCyclesSinceRefresh = 0;
+
     this._handoffToWanderThenRestart({
       minMs: this.cfg.exhaustedWanderMinMs,
       maxMs: this.cfg.exhaustedWanderMaxMs
@@ -600,8 +608,13 @@ export class EatOutController {
 
       if (!this._active) return;
 
+      this._wanderCyclesSinceRefresh += 1;
+
+      const shouldClear =
+        this._wanderCyclesSinceRefresh >= this._wandersBeforeRefresh;
+
       this.state = 'IDLE';
-      this._restartFresh();
+      this._restartFresh({ clearVisited: shouldClear });
     });
   }
 }
